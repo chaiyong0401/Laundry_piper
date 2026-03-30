@@ -1,0 +1,58 @@
+# Build artifacts
+build/
+install/
+devel/
+node_modules/
+**/__pycache__/
+*.pyc
+
+# ROS
+log/
+**/log/
+rosbag2_*/
+
+# Model checkpoints & weights
+act_learning/ckpts/
+Laundry_decision/run_bf/checkpoints/
+Laundry_decision/run_laundry/models/
+Laundry_decision/sam2/
+
+# Large datasets & debug dumps
+Laundry_decision/run_bf/dataset/
+Laundry_decision/run_bf/dataset_rgb_sam2/
+Laundry_decision/run_bf/_dbg/
+Laundry_decision/run_bf/eh_dbg/
+Laundry_decision/run_bf/debug_dump/
+Laundry_decision/run_bf/laundry_bg/
+Laundry_decision/run_bf/eh_basket_dbg/
+Laundry_decision/run_bf/*.npy
+Laundry_decision/run_failure/dataset/
+Laundry_decision/dataset_for_rgb_gate/
+data/preprocessed/
+
+# External libraries
+ts2vec/
+MTGFLOW/
+smf/
+osqp/
+osqp-eigen/
+piper_sdk/
+Piper_sdk_ui/
+
+# Image / binary outputs
+*.png
+*.jpg
+*.jpeg
+*.pdf
+
+# Binary data files (root level)
+*.npy
+*.pkl
+
+# Logs
+*.log
+
+# Misc
+.vscode/
+.DS_Store
+park22roboticfurniture.*
