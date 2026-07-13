@@ -27,11 +27,18 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 
 add_executable(planning_scene_node src/planning_scene.cpp)
+add_executable(planning_scene2_node src/planning_scene2.cpp)
 add_executable(joint_goal_node src/joint_goal.cpp)
 # add_executable(joint_goal_cmd_node src/joint_goal_cmd.cpp)
 add_executable(pose_goal_node src/pose_goal.cpp)
 
 ament_target_dependencies(planning_scene_node
+  rclcpp
+  moveit_ros_planning_interface
+  geometry_msgs
+)
+
+ament_target_dependencies(planning_scene2_node
   rclcpp
   moveit_ros_planning_interface
   geometry_msgs
@@ -69,13 +76,6 @@ target_link_libraries(pose_goal_node
 )
 
 
-ament_target_dependencies(planning_scene_node
-  rclcpp
-  moveit_ros_planning_interface
-  geometry_msgs
-)
-
-
 target_link_libraries(joint_goal_node pthread)
 
 ament_export_dependencies(rosidl_default_runtime)
@@ -89,6 +89,7 @@ install(FILES .setup_assistant DESTINATION share/${PROJECT_NAME})
 
 install(TARGETS
   planning_scene_node
+  planning_scene2_node
   joint_goal_node
   # joint_goal_cmd_node
   pose_goal_node

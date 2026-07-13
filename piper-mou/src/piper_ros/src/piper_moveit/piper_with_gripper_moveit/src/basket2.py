@@ -5,6 +5,9 @@ from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.clock import Clock
+import tf2_ros
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
 from action_msgs.msg import GoalStatus
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Pose, PoseStamped
@@ -27,6 +30,9 @@ from control_msgs.msg import JointTrajectoryControllerState
 import math
 from pathlib import Path
 import pinocchio as pin
+import os
+import datetime
+import argparse
 
 
 ########################## 비지도 클러스터링 ####################################################
@@ -109,10 +115,16 @@ def build_pin_model(urdf_or_xacro: str):
 
 class ControlTower(Node):
 
-    def __init__(self):
+    def __init__(self, run_mode: str = 'normal'):
         super().__init__('control_tower_node')
+        # run_mode: 'normal'   → 기존 동작 (rule-based 판단, 데이터 수집 없음)
+        #           'collect'  → 데이터 수집 모드 (human labeling)
+        #           'inference'→ 학습된 GRU-AE로 판단
+        self.run_mode = run_mode
+        self.get_logger().info(f"[MODE] 실행 모드: {self.run_mode}")
 
         self.ee_pose = None
+        self.wm_init_ee_orientation = None  # overcome2 시 wm_mid 도달 후 캡처
         self.ee_pose_st = PoseStamped() # Latest EE Pose as PoseStamped
         self.prev_x = None
         self.prev_y = None
@@ -150,6 +162,29 @@ class ControlTower(Node):
         self.monitor_initial_norm = 0.0
         self.monitor_initial_theta = 0.0
         self.current_goal_handle = None
+
+        # [DATA COLLECTION] GRU-AE 학습용 데이터 수집
+        self.is_recording = False
+        self.grasp_buffer = []          # Model 1: 6D feature 시계열
+        self.grasp_raw_buffer = []      # Model 1: raw taxel 48D 시계열
+        self.mrl = 0.0
+        self.data_save_dir = "/home/dyros/mcy_ws/grasp_data"
+        os.makedirs(self.data_save_dir, exist_ok=True)
+
+        # [INFERENCE] GRU-AE 모델 로드
+        self.gru_ae_model = None
+        self.gru_ae_scaler = None
+        self.gru_ae_threshold = 0.02
+        if self.run_mode == 'inference':
+            self._load_gru_ae()
+
+        # [SLIDING WINDOW] 실시간 inference 상태
+        self.realtime_buffer     = deque(maxlen=50)
+        self.inference_stride    = 5
+        self.inference_frame_cnt = 0
+        self.infer_consec_normal = 0
+        self.infer_consec_needed = 3
+        self.infer_latest_score  = None
 
 ########################## 비지도 클러스터링 ####################################################
 
@@ -215,9 +250,15 @@ class ControlTower(Node):
         self.current_joint_state = None
 
         self._arm_client = ActionClient(self, FollowJointTrajectory, '/moveit_action/arm_controller/follow_joint_trajectory')
+        self._arm_direct_client = ActionClient(self, FollowJointTrajectory, '/arm_controller/follow_joint_trajectory')
         self._gripper_client = ActionClient(self, FollowJointTrajectory, '/gripper_controller/follow_joint_trajectory')
         self._pose_client = ActionClient(self, PoseGoal, 'pose_goal')
-        
+        self._target_client = ActionClient(self, TargetPose, 'target_pose')
+
+        # TF buffer: DEEP 프레임의 실제 위치를 lookup하기 위함
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
         # [Controller Reset Client]
         from piper_msgs.srv import Enable
         self._enable_client = self.create_client(Enable, '/enable_srv')
@@ -234,6 +275,9 @@ class ControlTower(Node):
             servers_ready = False
         if not self._pose_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error("Pose Goal action server not available.")
+            servers_ready = False
+        if not self._target_client.wait_for_server(timeout_sec=5.0):
+            self.get_logger().error("Target Pose action server not available.")
             servers_ready = False
 
         if not servers_ready:
@@ -352,6 +396,26 @@ class ControlTower(Node):
         self.torque_stop = False
 
 
+    def get_deep_pose(self):
+        """TF lookup으로 DEEP 프레임의 base_link 기준 4x4 pose를 반환.
+        /end_pose(하드웨어 FK, link6 위치)와 다르므로 반드시 이 함수를 사용해야 함.
+        실패 시 None 반환."""
+        try:
+            t = self.tf_buffer.lookup_transform(
+                'base_link', 'DEEP',
+                rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=1.0)
+            )
+            tr = t.transform.translation
+            ro = t.transform.rotation
+            T = np.eye(4)
+            T[:3, :3] = R.from_quat([ro.x, ro.y, ro.z, ro.w]).as_matrix()
+            T[:3, 3] = [tr.x, tr.y, tr.z]
+            return T
+        except Exception as e:
+            self.get_logger().error(f"[get_deep_pose] TF lookup 실패: {e}")
+            return None
+
     def ee_pose_callback(self, msg):
         pos = msg.position
         ori = msg.orientation
@@ -382,40 +446,38 @@ class ControlTower(Node):
         #     point.time_from_start = Duration(sec=5, nanosec=0)
 
         # Dynamic Duration Calculation to prevent "Status 6" (Too Slow/Fast)
-        duration_sec = 5.0 # Default fallback
-            
+        duration_sec = 3.0 # Default fallback
+
         try:
             # Calculate max joint difference if current state is available
+            # current_joint_state is always 8-DOF [j1..j6, j7, j8]; slice to match joint_values length
             if hasattr(self, 'current_joint_state') and self.current_joint_state is not None:
-                # joint_values is target
-                # self.current_joint_state is current list
-                # Order is assumed same if length matches
-                if len(joint_values) == len(self.current_joint_state):
-                    diffs = [abs(t - c) for t, c in zip(joint_values, self.current_joint_state)]
+                n = len(joint_values)
+                if len(self.current_joint_state) >= n:
+                    cur_slice = self.current_joint_state[:n]
+                    diffs = [abs(t - c) for t, c in zip(joint_values, cur_slice)]
                     max_diff = max(diffs)
                         
                     # Speed Policy:
                     # Small move (rescue): 0.05 rad -> want ~0.5s (0.1 rad/s)
                     # Large move (home): 3.0 rad -> want ~5.0s (0.6 rad/s)
                     
-                    # Set min duration 0.5s, target speed ~0.6 rad/s
-                    req_duration = max_diff / 0.6
-                    duration_sec = max(0.8, req_duration) 
-                    
-                    # Cap max duration to avoid boredom? No, safety first.
-                    # Check specific small move case
-                    if max_diff < 0.1:
-                        duration_sec = 0.8
-                    elif max_diff > 4.0: # Very large
-                        duration_sec = 8.0
+                    # 속도 정책: 0.5 rad/s 기준 (이전 0.25 → 2배 빠르게)
+                    req_duration = (max_diff / 0.5) + 0.3
+                    duration_sec = max(0.8, req_duration)
+
+                    if max_diff < 0.05:
+                        duration_sec = 0.4
+                    elif max_diff > 4.0:  # Very large
+                        duration_sec = 5.0
                         
                     # self.get_logger().info(f"  [Move] Max Diff={max_diff:.3f} rad, Duration set to {duration_sec:.2f}s")
         except Exception as e:
             self.get_logger().warn(f"Duration calc failed: {e}")
-            duration_sec = 5.0
+            duration_sec = 3.0
 
         if set(joint_names) == set(self.gripper_joint_names):
-            point.time_from_start = Duration(sec=2, nanosec=0)
+            point.time_from_start = Duration(sec=1, nanosec=0)
         else:
             s = int(duration_sec)
             ns = int((duration_sec - s) * 1e9)
@@ -451,9 +513,24 @@ class ControlTower(Node):
 
         if result.status == GoalStatus.STATUS_SUCCEEDED:
             return True
+        elif result.status == 6:
+            # [FIX] Status 6 (ABORTED) often happens due to strict path/goal tolerances.
+            # If we are physically close enough, we can consider it a success.
+            # threshold 0.15 rad (~8.5 deg): 물리적으로 도달했으나 controller tolerance로
+            # abort되는 정상 케이스를 success로 처리.
+            # Rescue에서의 미이동 오판은 rescue 루프 내 before/after 비교로 별도 처리.
+            n = len(joint_values)
+            if hasattr(self, 'current_joint_state') and self.current_joint_state is not None and len(self.current_joint_state) >= n:
+                diffs = [abs(t - c) for t, c in zip(joint_values, self.current_joint_state[:n])]
+                max_diff = max(diffs)
+                if max_diff < 0.15: # Within ~8.5 degrees
+                    self.get_logger().info(f"Action aborted (Status 6) but near goal (diff={max_diff:.3f} rad). Treating as success.")
+                    return True
+            self.get_logger().warn(f"Action '{client._action_name}' failed with status: {result.status}")
+            return False
         else:
             self.get_logger().warn(f"Action '{client._action_name}' failed with status: {result.status}")
-            # return False
+            return False
 
     def send_joint_command(self, joint_values_8dof):
         self.get_logger().info(f"명령 수신: {joint_values_8dof}")
@@ -711,8 +788,8 @@ class ControlTower(Node):
                 goal_msg.yaw_tol_rad   = float(rpy_tol[2])
             
             # [NEW] 속도 제한 (Pilz Planner 지시 시 적용)
-            goal_msg.velocity_scaling = 0.05
-            goal_msg.acceleration_scaling = 0.05
+            goal_msg.velocity_scaling = 0.6
+            goal_msg.acceleration_scaling = 0.6
              
             # 2. Send Goal
             send_future = self._pose_client.send_goal_async(goal_msg)
@@ -727,12 +804,14 @@ class ControlTower(Node):
                 self.get_logger().warn(f"[forward] mode={mode_val} goal rejected")
                 return "rejected"
              
-            # 3. Wait Result
+            # 3. Wait Result (OMPL 기반 Mode 1은 planning + execution 시간 포함)
+            result_timeout = 50.0 if mode_val == 1 else 15.0
             result_future = goal_handle.get_result_async()
-            rclpy.spin_until_future_complete(self, result_future, timeout_sec=20.0) # Enough time
+            rclpy.spin_until_future_complete(self, result_future, timeout_sec=result_timeout)
             
             if not result_future.done():
                 self.get_logger().error(f"[forward] mode={mode_val} result wait timeout")
+                goal_handle.cancel_goal_async()  # MoveIt server 정리
                 return "timeout"
              
             result = result_future.result().result
@@ -771,6 +850,29 @@ class ControlTower(Node):
             return "fail"
 
 
+
+    def align_joint6(self):
+        """joint 1~5 유지, joint 6만 회전하여 wm_init_ee_orientation 기준 수평 정렬.
+        MoveIt collision 우회를 위해 /arm_controller 직접 전송."""
+        from scipy.spatial.transform import Rotation as R_scipy
+        if self.current_joint_state is None:
+            self.get_logger().warn("[align_joint6] joint state 미수신, 스킵")
+            return False
+        if self.ee_pose is None or self.wm_init_ee_orientation is None:
+            self.get_logger().warn("[align_joint6] EE pose 또는 wm_init_ee_orientation 미수신, 스킵")
+            return False
+
+        R_current = R_scipy.from_matrix(self.ee_pose[:3, :3])
+        R_desired  = self.wm_init_ee_orientation
+        R_diff = (R_current.inv() * R_desired).as_matrix()
+        delta6 = float(np.arctan2(R_diff[1, 0], R_diff[0, 0]))
+        self.get_logger().info(f"[align_joint6] delta6={np.degrees(delta6):.2f}°")
+
+        j6_new = float(self.current_joint_state[5]) + delta6
+        j6_new = float(np.clip(j6_new, -2.0944, 2.0944))
+        target = list(self.current_joint_state[:6])
+        target[5] = j6_new
+        return self._send_goal(self._arm_direct_client, self.arm_joint_names, target, wait_for_result=True)
 
     def move_back(self, pose: PoseStamped) -> bool:
         goal_msg = PoseGoal.Goal()
@@ -1030,6 +1132,137 @@ class ControlTower(Node):
         self.z_aligned, self.contacted = False, False
         self.get_logger().info("센서 기준값 및 상태 초기화 완료.")
 
+    def _spin_input(self, prompt: str) -> str:
+        """input()을 별도 스레드에서 실행하고, 그 동안 ROS2 spin을 유지.
+        collect 모드에서 input() 블로킹 시 센서 콜백이 멈추는 문제를 방지."""
+        result = [None]
+        done = threading.Event()
+
+        def _ask():
+            try:
+                result[0] = input(prompt).strip().lower()
+            except EOFError:
+                result[0] = ''
+            finally:
+                done.set()
+
+        t = threading.Thread(target=_ask, daemon=True)
+        t.start()
+        while not done.is_set():
+            rclpy.spin_once(self, timeout_sec=0.05)
+        t.join(timeout=1.0)
+        return result[0] if result[0] is not None else ''
+
+    def _save_grasp_data(self, label: str):
+        """수집된 파지 구간 시계열을 레이블과 함께 저장."""
+        if len(self.grasp_buffer) < 10:
+            self.get_logger().warn(f"[DATA] 프레임 수 부족 ({len(self.grasp_buffer)}), 저장 스킵")
+            return
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        # 6D feature 저장
+        seq = np.array(self.grasp_buffer, dtype=np.float32)       # [T, 6]
+        fname = os.path.join(self.data_save_dir, f"grasp_{ts}_{label}.npy")
+        np.save(fname, seq)
+        # raw taxel 저장 (48D)
+        raw = np.array(self.grasp_raw_buffer, dtype=np.float32)   # [T, 48]
+        fname_raw = os.path.join(self.data_save_dir, f"grasp_{ts}_{label}_raw.npy")
+        np.save(fname_raw, raw)
+        self.get_logger().info(f"[DATA] 저장 완료: {fname} (shape={seq.shape}), {fname_raw} (shape={raw.shape}), label={label}")
+
+    def _load_gru_ae(self):
+        """학습된 GRU-AE 모델 + scaler + threshold 로드."""
+        data_dir    = self.data_save_dir
+        model_path  = os.path.join(data_dir, "grasp_gru_ae.pt")
+        scaler_path = os.path.join(data_dir, "grasp_scaler.pkl")
+        thresh_path = os.path.join(data_dir, "grasp_threshold.npy")
+        for p in [model_path, scaler_path, thresh_path]:
+            if not os.path.exists(p):
+                self.get_logger().warn(f"[INFERENCE] 파일 없음: {p}")
+                return
+        try:
+            import torch, joblib, sys
+            sys.path.insert(0, "/home/dyros/mcy_ws")
+            from train_gru_ae import GRUAE
+            scaler    = joblib.load(scaler_path)
+            input_dim = scaler.n_features_in_
+            model = GRUAE(input_dim=input_dim, hidden_dim=64,
+                          num_layers=2, dropout=0.2, seq_len=50)
+            model.load_state_dict(torch.load(model_path, map_location="cpu"))
+            model.eval()
+            self.gru_ae_model     = model
+            self.gru_ae_scaler    = scaler
+            self.gru_ae_threshold = float(np.load(thresh_path)[0])
+            self.get_logger().info(
+                f"[INFERENCE] GRU-AE 로드 완료 "
+                f"(input_dim={input_dim}, threshold={self.gru_ae_threshold:.6f})")
+        except Exception as e:
+            self.get_logger().error(f"[INFERENCE] 모델 로드 실패: {e}")
+
+    def _run_windowed_inference(self) -> float | None:
+        """realtime_buffer 의 현재 50프레임 window 로 즉시 anomaly score 계산."""
+        if self.gru_ae_model is None or self.gru_ae_scaler is None:
+            return None
+        if len(self.realtime_buffer) < 50:
+            return None
+        try:
+            import torch
+            seq = np.array(list(self.realtime_buffer), dtype=np.float32)   # [50, 6]
+            seq_s = self.gru_ae_scaler.transform(seq).astype(np.float32)
+            x = torch.tensor(seq_s).unsqueeze(0)                           # [1, 50, 6]
+            with torch.no_grad():
+                recon = self.gru_ae_model(x)
+            return float(((recon - x) ** 2).mean().item())
+        except Exception as e:
+            self.get_logger().error(f"[SLIDING] inference error: {e}")
+            return None
+
+    def _run_inference(self):
+        """수집된 grasp_buffer로 GRU-AE anomaly score 계산."""
+        if self.gru_ae_model is None:
+            self.get_logger().warn("[INFERENCE] 모델 미로드, rule-based로 fallback")
+            return None
+        if len(self.grasp_buffer) < 10:
+            self.get_logger().warn("[INFERENCE] 프레임 수 부족")
+            return None
+        try:
+            import torch
+            from scipy.signal import resample
+            seq = np.array(self.grasp_buffer, dtype=np.float32)  # [T, 4]
+            seq_fixed = resample(seq, 50, axis=0).astype(np.float32)  # [50, 4]
+            x = torch.tensor(seq_fixed).unsqueeze(0)                  # [1, 50, 4]
+            with torch.no_grad():
+                recon = self.gru_ae_model(x)
+            score = float(((recon - x) ** 2).mean().item())
+            return score
+        except Exception as e:
+            self.get_logger().error(f"[INFERENCE] 추론 실패: {e}")
+            return None
+
+    def _request_human_label(self):
+        """사람이 직접 파지 결과를 확인하고 레이블을 입력.
+        Returns: 'success' | 'failure' | 'perturbation' | None (skip)
+        """
+        print("\n" + "="*50)
+        print("[DATA COLLECTION] 파지 결과를 직접 확인하고 입력하세요")
+        print("  s = success      (물체가 안정적으로 잡힘)  → 이송 진행")
+        print("  f = failure      (물체가 잡히지 않음)      → 그리퍼 오픈, 재시도")
+        print("  p = perturbation (약하게 걸렸거나 불안정)  → 그리퍼 오픈, 재시도")
+        print("  x = skip         (저장 안 함, rule-based 사용)")
+        print(f"  [참고] rule-based: norm={self.norm:.3f}, theta={self.theta:.1f}, max_norm={self.max_norm:.3f}")
+        print("="*50)
+        while True:
+            key = self._spin_input("레이블 입력 (s/f/p/x): ")
+            if key in ('s', 'f', 'p', 'x'):
+                break
+            print("  s / f / p / x 중 하나를 입력하세요")
+        label_map = {'s': 'success', 'f': 'failure', 'p': 'perturbation'}
+        if key == 'x':
+            self.get_logger().info("[DATA] 저장 스킵")
+            return None
+        label = label_map[key]
+        self._save_grasp_data(label=label)
+        return label
+
     def _trigger_slip_stop(self):
         # [USER REQUEST] Record Slip but CONTINUE motion
         if not self.contacted:
@@ -1117,6 +1350,37 @@ class ControlTower(Node):
             self.theta = theta_deg
             self.max_norm = max_norm
 
+            # [DATA COLLECTION] MRL 계산 + 버퍼링
+            valid_mask = norms > 0.1
+            if valid_mask.sum() >= 2:
+                unit_vecs = vecs[valid_mask] / norms[valid_mask, np.newaxis]
+                mean_unit = np.mean(unit_vecs, axis=0)           # (3,)
+                mrl = float(np.linalg.norm(mean_unit))           # [0, 1]
+            else:
+                mean_unit = np.zeros(3)
+                mrl = 0.0
+            self.mrl = mrl
+            if self.is_recording:
+                frame = [mrl, float(norm), float(max_norm),
+                         float(mean_unit[0]), float(mean_unit[1]), float(mean_unit[2])]
+                raw_frame = vecs.flatten().tolist()   # [48]
+                self.grasp_buffer.append(frame)
+                self.grasp_raw_buffer.append(raw_frame)
+
+                # [SLIDING WINDOW] 실시간 inference
+                if self.run_mode == 'inference':
+                    self.realtime_buffer.append(frame)
+                    self.inference_frame_cnt += 1
+                    if (len(self.realtime_buffer) >= 50 and
+                            self.inference_frame_cnt % self.inference_stride == 0):
+                        score = self._run_windowed_inference()
+                        if score is not None:
+                            self.infer_latest_score = score
+                            if score < self.gru_ae_threshold:
+                                self.infer_consec_normal += 1
+                            else:
+                                self.infer_consec_normal = 0
+
             # [Logic_inte_ba Logic Check]
             
             # [USER REQUEST] Continuous Slip Monitoring
@@ -1133,54 +1397,54 @@ class ControlTower(Node):
 
 
             # 1. Noise Filter (If force is too small, ignore norm)
-            # if max_norm < 0.5: 
-            #     self.z_aligned = False
-            #     self.contacted = False
-            # # 2. Heuristic Logic
-            # elif norm < 0.35:
-            #     self.get_logger().info(f" [Tactile] 0.35 이하 norm: {norm:.3f}, max_norm: {max_norm:.1f}, theta: {theta_deg:.1f}")
-            #     self.z_aligned = False
-            #     self.contacted = False
-            # else:
+            if max_norm < 0.5: 
+                self.z_aligned = False
+                self.contacted = False
+            # 2. Heuristic Logic
+            elif norm < 0.35:
+                # self.get_logger().info(f" [Tactile] 0.35 이하 norm: {norm:.3f}, max_norm: {max_norm:.1f}, theta: {theta_deg:.1f}")
+                self.z_aligned = False
+                self.contacted = False
+            else:
                 # self.get_logger().info(f" [Tactile] 0.35 이상 norm: {norm:.3f}, max_norm: {max_norm:.1f}, theta: {theta_deg:.1f}")
                 # if theta_deg < 70.0:
-                # if norm < 1.0: 
-                #     if theta_deg < 55.0:
-                #         # Vertical Force -> Z-Aligned
-                #         if not self.z_aligned:
-                #             self.get_logger().info(f"\n⚡ [TACTILE] Z-Aligned! (θ={theta_deg:.1f}°)")
-                #         self.z_aligned = True
-                #         self.contacted = False
+                if norm < 1.0: 
+                    if theta_deg < 55.0:
+                        # Vertical Force -> Z-Aligned
+                        # if not self.z_aligned:
+                        #     self.get_logger().info(f"\n⚡ [TACTILE] Z-Aligned! (θ={theta_deg:.1f}°)")
+                        self.z_aligned = True
+                        self.contacted = False
                     
-                #     # elif theta_deg <= 110.0:
-                #     elif theta_deg <= 80.0:
-                #         # Side Force -> Contact
-                #         if not self.contacted:
-                #             self.get_logger().info(f"\n⚡ [TACTILE] Contact Detected! (θ={theta_deg:.1f}°)")
-                #         self.contacted = True
-                #         self.z_aligned = False
-                #     else:
-                #         self.z_aligned = False
-                #         self.contacted = False
+                    # elif theta_deg <= 110.0:
+                    elif theta_deg <= 80.0:
+                        # Side Force -> Contact
+                        # if not self.contacted:
+                        #     self.get_logger().info(f"\n⚡ [TACTILE] Contact Detected! (θ={theta_deg:.1f}°)")
+                        self.contacted = True
+                        self.z_aligned = False
+                    else:
+                        self.z_aligned = False
+                        self.contacted = False
                 
-                # else: 
-                #     if theta_deg < 35.0:
-                #         # Vertical Force -> Z-Aligned
-                #         if not self.z_aligned:
-                #             self.get_logger().info(f"\n⚡ [TACTILE] Z-Aligned! (θ={theta_deg:.1f}°)")
-                #         self.z_aligned = True
-                #         self.contacted = False
+                else: 
+                    if theta_deg < 35.0:
+                        # Vertical Force -> Z-Aligned
+                        # if not self.z_aligned:
+                        #     self.get_logger().info(f"\n⚡ [TACTILE] Z-Aligned! (θ={theta_deg:.1f}°)")
+                        self.z_aligned = True
+                        self.contacted = False
                     
-                #     # elif theta_deg <= 110.0:
-                #     elif theta_deg <= 80.0:
-                #         # Side Force -> Contact
-                #         if not self.contacted:
-                #             self.get_logger().info(f"\n⚡ [TACTILE] Contact Detected! (θ={theta_deg:.1f}°)")
-                #         self.contacted = True
-                #         self.z_aligned = False
-                #     else:
-                #         self.z_aligned = False
-                #         self.contacted = False
+                    # elif theta_deg <= 110.0:
+                    elif theta_deg <= 80.0:
+                        # Side Force -> Contact
+                        # if not self.contacted:
+                        #     self.get_logger().info(f"\n⚡ [TACTILE] Contact Detected! (θ={theta_deg:.1f}°)")
+                        self.contacted = True
+                        self.z_aligned = False
+                    else:
+                        self.z_aligned = False
+                        self.contacted = False
 
             # self.norm = norm
             # self.theta = theta_deg
@@ -1198,8 +1462,6 @@ class ControlTower(Node):
             #         self.z_aligned = False
 
                     
-
-
 
 
 ########################## 비지도 클러스터링 ####################################################
@@ -1280,23 +1542,12 @@ class ControlTower(Node):
         return new_pose
 
     def target_get_wm(self, mode="failure", first=True): ### basket, wm, mid
-        # 액션 클라이언트가 처음이면 생성
-        if not hasattr(self, 'action_client'):
-            self.action_client = ActionClient(self, TargetPose, 'target_pose')
-
-        # 서버 대기
-        if not self.action_client.wait_for_server(timeout_sec=3.0):
-            self.get_logger().error('target_pose 액션 서버를 찾을 수 없습니다.')
-            return None
-
-        # Goal 메시지 생성
         goal_msg = TargetPose.Goal()
         goal_msg.start = True  # 요청 트리거
         goal_msg.mode = mode
 
-        # Goal 보내기
         self.get_logger().info('target_pose 요청 전송')
-        future = self.action_client.send_goal_async(goal_msg)
+        future = self._target_client.send_goal_async(goal_msg)
         rclpy.spin_until_future_complete(self, future)
 
         if not future.done():
@@ -1360,15 +1611,30 @@ class ControlTower(Node):
             pose_stamped = PoseStamped()
             pose_stamped.pose = pose
             
+            # Use strict coordinate matching in case node2.py flag wasn't passed
+            is_fixed_coord = (abs(p_cam[0] - 0.057) < 0.001 and 
+                              abs(p_cam[1] - (-0.044)) < 0.001 and 
+                              abs(p_cam[2] - 0.089) < 0.001)
+
+            if result.target_pose.orientation.x > 90.0 or is_fixed_coord:
+                pose_stamped.header.frame_id = "base_link|fixed"
+            else:
+                pose_stamped.header.frame_id = "base_link"
+            
             # [USER REQUEST] Limit Minimum Z Height
             MIN_Z_LIMIT = 0.2 # 20cm
+            MAX_Z_LIMIT = 0.265
             # MAX_Y_LIMIT = 0.33    # original
-            MAX_Y_LIMIT = 0.23 
+            MAX_Y_LIMIT = 0.24 
             if pose_stamped.pose.position.z < MIN_Z_LIMIT:
                 self.get_logger().warn(f"  >> Target Z ({pose_stamped.pose.position.z:.3f}) is too low! Clamping to {MIN_Z_LIMIT}")
                 pose_stamped.pose.position.z = MIN_Z_LIMIT
+            if pose_stamped.pose.position.z > MAX_Z_LIMIT:
+                self.get_logger().warn(f"  >> Target Z ({pose_stamped.pose.position.z:.3f}) is too high! Clamping to {MAX_Z_LIMIT}")
+                pose_stamped.pose.position.z = MAX_Z_LIMIT
 
         
+            pose_stamped.pose.position.x -= 0.03  # -1cm offset
             tx, ty = pose_stamped.pose.position.x, pose_stamped.pose.position.y
             self.get_logger().info(f"  [Wall Check] Target XY: ({tx:.3f}, {ty:.3f})")
             if pose_stamped.pose.position.y > MAX_Y_LIMIT:
@@ -1425,23 +1691,13 @@ class ControlTower(Node):
             return None
 
     def target_get_ba(self, mode="basket"): ### basket, wm, mid
-        # 액션 클라이언트가 처음이면 생성
-        if not hasattr(self, 'action_client'):
-            self.action_client = ActionClient(self, TargetPose, 'target_pose')
-
-        # 서버 대기
-        if not self.action_client.wait_for_server(timeout_sec=3.0):
-            self.get_logger().error('target_pose 액션 서버를 찾을 수 없습니다.')
-            return None
-
-        # Goal 메시지 생성
         goal_msg = TargetPose.Goal()
         goal_msg.start = True  # 요청 트리거
         goal_msg.mode = mode
 
         # Goal 보내기
         self.get_logger().info('target_pose 요청 전송')
-        future = self.action_client.send_goal_async(goal_msg)
+        future = self._target_client.send_goal_async(goal_msg)
         rclpy.spin_until_future_complete(self, future)
 
         if not future.done():
@@ -1504,7 +1760,7 @@ class ControlTower(Node):
             # So DEEP (Base) = DEEP (World) - 0.445
             # MIN_SAFE_Z_BASE = 0.155 - 0.445 = -0.290
             
-            MIN_SAFE_Z_BASE = -0.320
+            MIN_SAFE_Z_BASE = -0.310
             if pose.position.z < MIN_SAFE_Z_BASE:
                  self.get_logger().warn(f"Target Z ({pose.position.z:.3f}) too low! Clamping to {MIN_SAFE_Z_BASE} (Base Frame)")
                  pose.position.z = MIN_SAFE_Z_BASE
@@ -1525,19 +1781,20 @@ class ControlTower(Node):
             
             SAFE_DIST = 0.04 # 4cm
             
-            if min_dist >= SAFE_DIST: # Safe from wall -> Maintain Vertical
-                 # --- Fix Orientation: Use current EE orientation ---
-                from scipy.spatial.transform import Rotation as ScipyRotation
-                current_rot_mat = self.ee_pose[:3, :3]
-                r = ScipyRotation.from_matrix(current_rot_mat)
-                qx, qy, qz, qw = r.as_quat()
-                pose.orientation.x = qx
-                pose.orientation.y = qy
-                pose.orientation.z = qz
-                pose.orientation.w = qw
-                self.get_logger().info(f"Target Safe (dist={min_dist*100:.1f}cm > 4cm). Force Vertical Orientation.")
+            # 벽 거리와 무관하게 항상 현재 EE orientation 사용
+            # (벽 근처에서 identity orientation을 쓰면 IK 해가 없는 경우가 발생)
+            from scipy.spatial.transform import Rotation as ScipyRotation
+            current_rot_mat = self.ee_pose[:3, :3]
+            r = ScipyRotation.from_matrix(current_rot_mat)
+            qx, qy, qz, qw = r.as_quat()
+            pose.orientation.x = qx
+            pose.orientation.y = qy
+            pose.orientation.z = qz
+            pose.orientation.w = qw
+            if min_dist >= SAFE_DIST:
+                self.get_logger().info(f"Target Safe (dist={min_dist*100:.1f}cm > 4cm). EE Orientation.")
             else:
-                self.get_logger().info(f"Target Near Wall (dist={min_dist*100:.1f}cm < 4cm). Use Vision Orientation.")
+                self.get_logger().info(f"Target Near Wall (dist={min_dist*100:.1f}cm < 4cm). EE Orientation (was identity).")
 
             self.get_logger().info(f"\033[94m변환한 bA: {pose}\033[0m") # Blue
 
@@ -1559,23 +1816,12 @@ class ControlTower(Node):
             return None
 
     def target_get_bg(self, mode = "failure_bg"):
-        # 액션 클라이언트가 처음이면 생성
-        if not hasattr(self, 'action_client'):
-            self.action_client = ActionClient(self, TargetPose, 'target_pose')
-
-        # 서버 대기
-        if not self.action_client.wait_for_server(timeout_sec=3.0):
-            self.get_logger().error('target_pose 액션 서버를 찾을 수 없습니다.')
-            return None
-
-        # Goal 메시지 생성
         goal_msg = TargetPose.Goal()
         goal_msg.start = True  # 요청 트리거
         goal_msg.mode = mode
 
-        # Goal 보내기
         self.get_logger().info('target_pose 요청 전송')
-        future = self.action_client.send_goal_async(goal_msg)
+        future = self._target_client.send_goal_async(goal_msg)
         rclpy.spin_until_future_complete(self, future)
 
         if not future.done():
@@ -1650,21 +1896,48 @@ class ControlTower(Node):
             self.get_logger().info("Step 2: 파지 자세(wm_mid)로 이동 및 좌표 계산")
             
             while not self.goal(self.wm_mid, 'keep'):
-                # self.get_logger().warn("  >> 실패 → 재시도 중")
                 self.get_logger().warn("  >> wm_mid 이동 실패 → 재시도 중")
-
-            self.get_logger().info("잡기 시도 중... (컨트롤러 안정화 대기)")
             import time
             time.sleep(1.0) # [CRITICAL] Let the controller settle before Vision blocks the thread
+
+            # wm_mid 도달 후 EE orientation 캡처 (joint6 align 기준)
+            rclpy.spin_once(self, timeout_sec=0.15)
+            if self.ee_pose is not None:
+                from scipy.spatial.transform import Rotation as R_scipy
+                self.wm_init_ee_orientation = R_scipy.from_matrix(self.ee_pose[:3, :3])
+                self.get_logger().info("[overcome2] wm_mid EE orientation 캡처 완료")
+            
+            # --- [USER SUGGESTED OPTIMIZATION] (주석 처리됨) ---
+            # # wm_mid에서의 탐지("클러스터 너무 작음" 오류 빈발)를 생략하고
+            # # 위쪽 wm_view에서 구한 목표 좌표(chk_pose)를 복사해서 바로 활용합니다.
+            # self.get_logger().info("[OPTIMIZATION] Skipping failure_rgb_diff at wm_mid, using coordinate from wm_view.")
+            # import copy
+            # target_wm = copy.deepcopy(chk_pose)
+            # target_wm.pose.position.y = 0.24
+            
+            # --- 기존 코드 복구 ---
             target_wm = self.target_get_wm(mode="failure_rgb_diff")  # 감지 및 잡기 시도 (RGB 배경오차)
             self.reset_sensor_data()
 
             if target_wm == None:
                 self.get_logger().info("결과 없음")
                 break
-            # [VISUALIZATION] Overcome Target Marker (Blue)
-            self.publish_target_marker(target_wm.pose, id=2, r=0.0, g=0.0, b=1.0)
-            self.get_logger().info(f"  [OVERCOME] Target WM: \n{target_wm.pose}")
+
+            # check if it's a fixed point via flag on frame_id
+            self.get_logger().info(f"[DEBUG] target_wm frame_id is: '{target_wm.header.frame_id}'")
+            is_fixed = (target_wm.header.frame_id == "base_link|fixed")
+            target_wm.header.frame_id = "base_link"  # clean up for moveit
+
+            # [VISUALIZATION] Overcome Target Marker (Fixed=Red, Default=Blue)
+            t_r, t_g, t_b = (1.0, 0.0, 0.0) if is_fixed else (0.0, 0.0, 1.0)
+            target_name = "Fixed WM Target" if is_fixed else "Target WM"
+            self.publish_target_marker(target_wm.pose, id=2, r=t_r, g=t_g, b=t_b)
+            self.get_logger().info(f"  [OVERCOME] {target_name}: \n{target_wm.pose}")
+            
+            # wm_view에서 가져온 좌표를 파란색 구 마커로 표시 (is_fixed 로직 건너뜀) (주석 처리)
+            # is_fixed = False
+            # self.publish_target_marker(target_wm.pose, id=2, r=0.0, g=0.0, b=1.0)
+            # self.get_logger().info(f"  [OVERCOME] Target WM (from wm_view): \n{target_wm.pose}")
 
             # [Added] Pre-Grasp Approach (EE -5cm Retreat) to avoid collision checks (M0)
             import copy
@@ -1677,47 +1950,50 @@ class ControlTower(Node):
             q = [target_wm.pose.orientation.x, target_wm.pose.orientation.y, target_wm.pose.orientation.z, target_wm.pose.orientation.w]
             rot = R_scipy.from_quat(q)
             # retreat_vec = rot.apply([0, 0, -0.05]) # 5cm back
-            retreat_vec = rot.apply([0, 0, -0.01]) # 1cm back
-            
+            retreat_vec = rot.apply([0, 0, -0.03]) # 3cm back
+
             pre_grasp_pose.pose.position.x += retreat_vec[0]
             pre_grasp_pose.pose.position.y += retreat_vec[1]
             pre_grasp_pose.pose.position.z += retreat_vec[2]
-            
+
             # 1. Approach Pre-Grasp
-            # 1. Approach Pre-Grasp (With Yaw Search)
-            # [VISUALIZATION] Pre-Grasp Marker (Cyan)
-            for i in range(5):
-                self.get_logger().info(f" Pre-Grasp {i+1} th Approach ... ")
-                self.publish_target_marker(pre_grasp_pose.pose, id=3, r=0.0, g=1.0, b=1.0)
-                self.get_logger().info("  [OVERCOME] Valid Target found. Moving to Pre-Grasp (EE -5cm)...")
-                approach_success = False
-                yaw_candidates = [0, 45, -45] # Avoid 135, 180 (exceeds Piper limit +/- 120deg)
-                orig_q_pg = [pre_grasp_pose.pose.orientation.x, pre_grasp_pose.pose.orientation.y,
-                                pre_grasp_pose.pose.orientation.z, pre_grasp_pose.pose.orientation.w]
-                for yaw in yaw_candidates:
-                    if yaw != 0:
-                        self.get_logger().info(f"  [OVERCOME] Retrying with Yaw Rotation: {yaw} deg")
-                        # Apply Yaw Rotation (Local Z)
-                        rot_z = R_scipy.from_euler('z', yaw, degrees=True)
-                        orig_rot = R_scipy.from_quat(orig_q_pg)
-                        new_rot = orig_rot * rot_z
-                        nx, ny, nz, nw = new_rot.as_quat()
-                        pre_grasp_pose.pose.orientation.x = nx
-                        pre_grasp_pose.pose.orientation.y = ny
-                        pre_grasp_pose.pose.orientation.z = nz
-                        pre_grasp_pose.pose.orientation.w = nw
-                    # Single attempt per angle (허용 오차 0.2 라디안, 약 11.5도 부여)
-                    res = self.move_forward(pre_grasp_pose, fallback_to_ik=True, disable_torque=True, rpy_tol=[0.5, 0.5, 0.5])
-                    if res == "success":
-                        approach_success = True
-                        self.get_logger().info(f"  [OVERCOME] Approach Success with Yaw {yaw} deg!")
-                            # Update final target orientation to match successful pre-grasp orientation
-                        target_wm.pose.orientation = pre_grasp_pose.pose.orientation
+            p_r, p_g, p_b = (1.0, 0.5, 0.0) if is_fixed else (0.0, 1.0, 1.0)
+            self.get_logger().info(f" Pre-Grasp Approach ... ")
+            self.publish_target_marker(pre_grasp_pose.pose, id=3, r=p_r, g=p_g, b=p_b)
+            self.get_logger().info("  [OVERCOME] Valid Target found. Moving to Pre-Grasp (EE -3cm)...")
+            res = self.move_forward(pre_grasp_pose, fallback_to_ik=True, disable_torque=True, ik_mode=1, rpy_tol=[6.28, 6.28, 6.28])
+            approach_success = (res == "success")
+            if approach_success:
+                self.get_logger().info(f"  [OVERCOME] Approach Success!")
+
+                # joint6 align (수평 정렬)
+                self.get_logger().info("[overcome2] joint6 align 중...")
+                for _aj6_try in range(3):
+                    if self.align_joint6():
                         break
-                    else:
-                        self.get_logger().warn(f"  >> Pre-Grasp failed (Yaw {yaw}) result={res}")
-                if approach_success:
-                    break
+                    self.get_logger().warn(f"  >> joint6 정렬 실패 → 재시도 ({_aj6_try+1}/3)")
+
+                # align 후: 위치는 원래 target_wm 유지, orientation만 현재 EE 기준 갱신
+                # [수정] 이전 코드는 EE+3cm_in_local_z로 위치를 재계산했으나,
+                # joint6 회전으로 EE가 드럼 밖(y≈0.09)으로 밀려나고 local_z가 드럼 반대를 향해
+                # 그리퍼가 y=0.09→0.09+작은값 (뒤쪽 허공)으로 가서 닫히는 문제가 있었음.
+                # 원본 target_wm 위치(y≈0.23, 드럼 내부)를 유지하고 Mode 1으로 재진입
+                rclpy.spin_once(self, timeout_sec=0.15)
+                if self.ee_pose is not None:
+                    from scipy.spatial.transform import Rotation as R_scipy
+                    curr_rot = self.ee_pose[:3, :3]
+                    q_cur = R_scipy.from_matrix(curr_rot).as_quat()
+                    # 위치 변경 없이 orientation만 업데이트
+                    for ps in [target_wm, pre_grasp_pose]:
+                        ps.pose.orientation.x = float(q_cur[0])
+                        ps.pose.orientation.y = float(q_cur[1])
+                        ps.pose.orientation.z = float(q_cur[2])
+                        ps.pose.orientation.w = float(q_cur[3])
+                    self.get_logger().info(
+                        f"[align_joint6 후] orientation 갱신 (위치 유지): "
+                        f"pos=[{target_wm.pose.position.x:.3f}, {target_wm.pose.position.y:.3f}, {target_wm.pose.position.z:.3f}] "
+                        f"q=[{q_cur[0]:.3f}, {q_cur[1]:.3f}, {q_cur[2]:.3f}, {q_cur[3]:.3f}]"
+                    )
             if not approach_success:
                 self.get_logger().warn("  >> [OVERCOME] Pre-Grasp failed (All Angles). Attempting Joint-based Fallback...")
                 fallback_joints = [1.274389, 0.598975, -0.289762, -0.500294, 0.076265, 0.44763, 0.03, 0.03]
@@ -1726,21 +2002,26 @@ class ControlTower(Node):
                 if res_joint:
                     self.get_logger().info("  >> Success moving to Fallback Joints. Calculating 1cm Blind Push...")
                     time.sleep(0.5) # Wait for TF update
-                    
-                    # Calculate 1cm forward from current pose (after joint move)
-                    curr_pose_mat = self.ee_pose # 4x4
+
+                    # TF로 DEEP 프레임의 실제 위치를 가져옴
+                    # /end_pose(하드웨어 FK)는 link6 위치이므로 사용 불가 - DEEP과 약 13cm 차이
+                    curr_pose_mat = self.get_deep_pose()
+                    if curr_pose_mat is None:
+                        self.get_logger().error("  >> DEEP TF lookup 실패. 이 target 건너뜀.")
+                        continue
                     curr_rot = curr_pose_mat[:3, :3]
                     curr_pos = curr_pose_mat[:3, 3]
-                    
-                    # 1cm forward along EE Z-axis
-                    push_vec = curr_rot @ np.array([0, 0, 0.01]) 
-                    
+                    self.get_logger().info(f"  >> DEEP pos(TF): [{curr_pos[0]:.3f}, {curr_pos[1]:.3f}, {curr_pos[2]:.3f}]")
+
+                    # 1cm forward along DEEP Z-axis
+                    push_vec = curr_rot @ np.array([0, 0, 0.01])
+
                     # Update target_wm to be this new relative target
                     target_wm.pose.position.x = float(curr_pos[0] + push_vec[0])
                     target_wm.pose.position.y = float(curr_pos[1] + push_vec[1])
                     target_wm.pose.position.z = float(curr_pos[2] + push_vec[2])
-                    
-                    # Keep orientation from the joint pose
+
+                    # Keep orientation from the DEEP frame
                     from scipy.spatial.transform import Rotation as ScipyRot
                     r = ScipyRot.from_matrix(curr_rot)
                     qx, qy, qz, qw = r.as_quat()
@@ -1748,16 +2029,26 @@ class ControlTower(Node):
                     target_wm.pose.orientation.y = qy
                     target_wm.pose.orientation.z = qz
                     target_wm.pose.orientation.w = qw
-                    
+
                     approach_success = True
                 else:
                     self.get_logger().error("  >> Fallback Joint move failed. Skipping this target.")
                     continue
             # 2. Move to Grasp Target (Push)
             self.get_logger().info("  [OVERCOME] Moving to Grasp Target...")
+            p = target_wm.pose.position
+            o = target_wm.pose.orientation
+            self.get_logger().info(
+                f"  [OVERCOME] target_wm pose:\n"
+                f"    position   : x={p.x:.4f}  y={p.y:.4f}  z={p.z:.4f}\n"
+                f"    orientation: x={o.x:.4f}  y={o.y:.4f}  z={o.z:.4f}  w={o.w:.4f}"
+            )
             forward_state = None
-            for i in range(5):
-                forward_state = self.move_forward(target_wm) # 6
+            for i in range(2):
+                # pre_grasp에서 target_wm까지 3cm 직선 push.
+                # Mode 9(Cartesian + collision ON)는 드럼 내부 collision으로 실패.
+                # Mode 11(computeCartesianPath + avoid_collisions=false): orientation 유지 + 드럼 내부 push
+                forward_state = self.move_forward(target_wm, fallback_to_ik=True, disable_torque=True, ik_mode=11, rpy_tol=[6.28, 6.28, 6.28])
 
                 if forward_state == "success":
                     break  # 정상 성공
@@ -1767,13 +2058,69 @@ class ControlTower(Node):
                     self.recover_robot() # [CRITICAL] Unlock safety latch immediately
                     break  # 접촉으로 판단 → retry 금지, 바로 다음 단계로
 
-                self.get_logger().warn(f"forward 실패 ({i+1}/5) → 재시도 중")   
+                self.get_logger().warn(f"forward 실패 ({i+1}/2) → 재시도 중")
 
             else:
-                self.get_logger().warn("forward 5회 실패 → 새 target")
-                continue     # 다음 루프로
+                self.get_logger().warn("forward 2회 실패 → 새 target")
 
+                # [진단] Mode 6 (IK only) 로 IK 존재 여부 확인
+                # fallback_to_ik=True + ik_mode=6 → Mode 9 실패 후 Mode 6 IK 실제 시도
+                self.get_logger().warn("  [DIAGNOSE] Mode 6 (IK only) 로 도달 가능성 테스트...")
+                diag_result = self.move_forward(target_wm, fallback_to_ik=True, disable_torque=True, ik_mode=6, rpy_tol=[6.28, 6.28, 6.28])
+                if diag_result == "success":
+                    self.get_logger().warn(
+                        f"  [DIAGNOSE] Mode 6 성공 → IK 존재. 직선 경로 문제 (joint limit / singularity).\n"
+                        f"    position   : x={p.x:.4f}  y={p.y:.4f}  z={p.z:.4f}\n"
+                        f"    orientation: x={o.x:.4f}  y={o.y:.4f}  z={o.z:.4f}  w={o.w:.4f}"
+                    )
+                    forward_state = "success"
+                else:
+                    self.get_logger().error(
+                        f"  [DIAGNOSE] Mode 6 도 실패 → IK 해 없음. pose 자체가 workspace 밖이거나 충돌 상태.\n"
+                        f"    position   : x={p.x:.4f}  y={p.y:.4f}  z={p.z:.4f}\n"
+                        f"    orientation: x={o.x:.4f}  y={o.y:.4f}  z={o.z:.4f}  w={o.w:.4f}"
+                    )
+                    # [추가 fallback] Mode 0 (OMPL) — joint space 탐색으로 singularity 우회
+                    self.get_logger().warn("  [FALLBACK] Mode 0 (OMPL) 로 push 시도...")
+                    ompl_result = self.move_forward(target_wm, fallback_to_ik=True, disable_torque=True, ik_mode=0, rpy_tol=[6.28, 6.28, 6.28])
+                    if ompl_result == "success":
+                        self.get_logger().info("  [FALLBACK] Mode 0 (OMPL) 성공!")
+                        forward_state = "success"
+                    else:
+                        self.get_logger().error(
+                            f"  [FALLBACK] Mode 0 도 실패. 이 target 포기.\n"
+                            f"    position   : x={p.x:.4f}  y={p.y:.4f}  z={p.z:.4f}"
+                        )
+                        continue     # 다음 target으로
+
+            # 3. Close gripper & Retreat (pre_grasp 위치로 복귀, Mode 11)
             self.close_gripper()
+            self.get_logger().info("  [OVERCOME] Retreating to pre-grasp...")
+            # Mode 11: Cartesian 직선 (avoid_collisions=false) → push와 동일, 항상 부드러운 직선 경로
+            ret = self.move_forward(pre_grasp_pose, fallback_to_ik=True, disable_torque=True, ik_mode=11, rpy_tol=[6.28, 6.28, 6.28])
+            if ret != "success":
+                self.get_logger().warn("  [OVERCOME] pre_grasp 복귀 실패 → Mode 6 재시도")
+                ret = self.move_forward(pre_grasp_pose, fallback_to_ik=True, disable_torque=True, ik_mode=6, rpy_tol=[6.28, 6.28, 6.28])
+            if ret != "success":
+                self.get_logger().warn("  [OVERCOME] pre_grasp 복귀 실패 → Mode 0 (OMPL) 재시도")
+                self.move_forward(pre_grasp_pose, fallback_to_ik=True, disable_torque=True, ik_mode=0, rpy_tol=[6.28, 6.28, 6.28])
+
+            # 4. 촉각 기반 파지 성공 판단
+            rclpy.spin_once(self, timeout_sec=0.1)  # 센서 콜백 최신화
+            is_grasp     = self.max_norm > 0.35
+            is_valid_norm = self.norm > 0.35
+            is_not_edge  = self.theta < 85.0
+            grasp_success = is_grasp and is_valid_norm and is_not_edge
+            if grasp_success:
+                self.get_logger().info(
+                    f"  [OVERCOME] 파지 성공 (norm={self.norm:.3f}, max_norm={self.max_norm:.3f}, theta={self.theta:.1f}°)"
+                )
+            else:
+                self.get_logger().warn(
+                    f"  [OVERCOME] 파지 실패 (norm={self.norm:.3f}, max_norm={self.max_norm:.3f}, theta={self.theta:.1f}°) → 그리퍼 오픈 후 재탐색"
+                )
+                self.open_gripper()
+                continue  # while True 처음으로 → 새 target 탐색
             import copy
             self.get_logger().info("  >> [Overcome] Force Retreat 5cm (Blind)")
             
@@ -1821,41 +2168,46 @@ class ControlTower(Node):
                 self.recover_robot()
                 
                 # Rescue Mode: Incrementally lift shoulder/elbow to escape
-                for rescue_step in range(5):
-                    self.get_logger().info(f"    >> [Rescue] Step {rescue_step+1}/5: Lifting arm slightly...")
-                    
-                    # Wait for fresh joint state
-                    import time
-                    for _ in range(10):
-                        if self.current_joint_state is not None: break
-                        time.sleep(0.05)
-                        
-                    if self.current_joint_state:
-                         current = list(self.current_joint_state)
-                         target_rescue = list(current)
-                         # Lift Shoulder (J2) and Fold Elbow (J3) slightly
-                        #  target_rescue[1] += 0.05 # ~3 deg
-                         target_rescue[2] -= 0.01 # ~3 deg
-                         
-                         # Keep gripper
-                         target_rescue[6] = current[6]
-                         target_rescue[7] = current[7]
-                         
-                         if self.goal(target_rescue, 'keep'):
-                             self.get_logger().info("    >> [Rescue] Small move success.")
-                         else:
-                             self.get_logger().warn("    >> [Rescue] Small move failed.")
-                    
-                    # Try wm_mid again? or just continue lifting?
-                    # Let's try wm_mid every 2 steps or just finish lifting first.
-                    time.sleep(0.5)
-                
-                # Final Attempt to wm_mid after rescue
-                self.get_logger().info("  >> [Rescue] Retrying ff after rescue moves...")
-                if self.goal(self.ff, 'keep'):
-                     self.get_logger().info("  >> [Rescue] Success! Recovered to ff.")
+                # current_joint_state를 매 step 새로 읽으면 실제로 이동하지 않았을 때
+                # 같은 목표를 5번 반복하게 됨. 대신 초기 pose에서 누적으로 목표를 증가시킴.
+                import time
+                for _ in range(10):
+                    if self.current_joint_state is not None: break
+                    time.sleep(0.05)
+
+                if self.current_joint_state:
+                    # 초기 joint 값을 한 번만 읽고, 누적 목표로 관리
+                    rescue_base = list(self.current_joint_state)
+                    for rescue_step in range(5):
+                        self.get_logger().info(f"    >> [Rescue] Step {rescue_step+1}/5: Lifting arm slightly...")
+                        target_rescue = list(rescue_base)
+                        target_rescue[1] += 0.12 * (rescue_step + 1)  # J2 Shoulder lift 누적
+                        target_rescue[2] -= 0.12 * (rescue_step + 1)  # J3 Elbow fold 누적
+                        target_rescue[6] = rescue_base[6]
+                        target_rescue[7] = rescue_base[7]
+
+                        before = list(self.current_joint_state) if self.current_joint_state else rescue_base
+                        if self.goal(target_rescue, 'keep'):
+                            after = list(self.current_joint_state) if self.current_joint_state else before
+                            actually_moved = abs(after[1] - before[1]) > 0.03 or abs(after[2] - before[2]) > 0.03
+                            if actually_moved:
+                                self.get_logger().info("    >> [Rescue] Small move success.")
+                            else:
+                                self.get_logger().warn("    >> [Rescue] goal() returned True but joint didn't move. Continuing...")
+                        else:
+                            self.get_logger().warn("    >> [Rescue] Small move failed.")
+
+                        time.sleep(0.5)
+
+                # Rescue 후 pre_grasp로 복귀 시도 (직접 JTC 대신 MoveIt Mode 6)
+                self.get_logger().info("  >> [Rescue] Retrying pre_grasp via Mode 6 after rescue...")
+                ret2 = self.move_forward(pre_grasp_pose, fallback_to_ik=True, disable_torque=True, ik_mode=6, rpy_tol=[6.28, 6.28, 6.28])
+                if ret2 == "success":
+                    self.get_logger().info("  >> [Rescue] pre_grasp 복귀 성공. ff로 이동...")
+                    if not self.goal(self.ff, 'keep'):
+                        self.get_logger().warn("  >> [Rescue] ff 이동 실패. 루프 계속.")
                 else:
-                     self.get_logger().error("  >> [Rescue] Final ff attempt failed. Critical Stuck.")
+                    self.get_logger().error("  >> [Rescue] pre_grasp 복귀 실패. Critical Stuck.")
 
             retreat_done = True # Mark as done so loop continues correctly if needed
 
@@ -2196,7 +2548,7 @@ class ControlTower(Node):
 
 
     def execute_sequence(self):
-        self.get_logger().info("Step 0: 문 여는 중")
+        # self.get_logger().info("Step 0: 문 여는 중")
         # self.open_door()
         
         self.get_logger().info("Step 0.5: 배경 이미지(RGB/Depth) 자동 초기 캡처 진행")
@@ -2220,11 +2572,11 @@ class ControlTower(Node):
                     self.get_logger().warn("  >> 실패 → 재시도 중")
                 self.reset_sensor_data()
                 import time
-                self.get_logger().info("Step 2: 잡기 시도 중... (컨트롤러 안정화 대기)")
-                time.sleep(1.0) # [CRITICAL] Let the controller settle before Vision blocks the thread
+                self.get_logger().info("Step 2: 잡기 시도 중...")
                 target_ba = self.target_get_ba(mode="basket")  # 감지
                 if target_ba.pose.position.z == -99.0:
-                    self.get_logger().info("🛑 [Overcome] 빈 바구니 감지 (RGB Gate). 작업 종료.")
+                    self.get_logger().info("🛑 [Overcome] 빈 바구니 감지 (RGB Gate). overcome2 호출.")
+                    self.overcome2()
                     break
             
                 # --- Three-Stage Approach: 1. Approach Hover 2. Pre-Grasp 3. Push ---
@@ -2306,13 +2658,22 @@ class ControlTower(Node):
                 # Stage 2 실패 시 Stage 3 시도: 수직 유지 완화 계획 (Mode 1, ±15도 허용)
                 # Mode 1: OMPL Planner를 사용하여 목표 위치(XYZ)에 도달하되, 
                 # 수직 방향에서 상하좌우 ±30도 이내의 기울기를 허용하여 충돌을 회피하는 경로를 찾습니다.
+                # if not approach_success:
+                #     self.get_logger().info("\033[94m [Stage 3] 수직 유지 완화(Mode 1) 계획 시도\033[0m")
+                #     # roll_tol, pitch_tol = 0.52 rad (~30 deg), yaw_tol = 6.28 (자유)
+                #     res = self.move_forward(pre_grasp_pose, fallback_to_ik=True, ik_mode=1, rpy_tol=[0.52, 0.52, 6.28], disable_torque=True)
+                #     if res == "success":
+                #         approach_success = True
+                #         self.get_logger().info("\n\033[92m[SUCCESS] Pre-Grasp 도달! (Relaxed Orientation)\033[0m")
+
+                # Stage 4: orientation 완전 자유 (path constraint 없음)
+                # d435i가 벽을 피하는 joint6 회전을 OMPL이 자유롭게 탐색하도록 허용
                 if not approach_success:
-                    self.get_logger().info("\033[94m [Stage 3] 수직 유지 완화(Mode 1) 계획 시도\033[0m")
-                    # roll_tol, pitch_tol = 0.52 rad (~30 deg), yaw_tol = 6.28 (자유)
-                    res = self.move_forward(pre_grasp_pose, fallback_to_ik=True, ik_mode=1, rpy_tol=[0.26, 0.26, 6.28], disable_torque=True)
+                    self.get_logger().info("\033[94m [Stage 4] Orientation 완전 자유(Mode 1, no path constraint) 시도\033[0m")
+                    res = self.move_forward(pre_grasp_pose, fallback_to_ik=True, ik_mode=1, rpy_tol=[6.28, 6.28, 6.28], disable_torque=True)
                     if res == "success":
                         approach_success = True
-                        self.get_logger().info("\n\033[92m[SUCCESS] Pre-Grasp 도달! (Relaxed Orientation)\033[0m")
+                        self.get_logger().info("\n\033[92m[SUCCESS] Pre-Grasp 도달! (Free Orientation)\033[0m")
 
                 if approach_success:
                     tip_pose = np.eye(4)
@@ -2392,8 +2753,8 @@ class ControlTower(Node):
                 # 3. Push (Actual Grasp Move)
                 self.get_logger().info("Step 2-3: 잡기(Push) 이동 중...")
                 forward_state = None
-                for i in range(5):
-                    forward_state = self.move_forward(target_ba) # Hybrid
+                for i in range(3):
+                    forward_state = self.move_forward(target_ba, ik_mode=11) # Cartesian, avoid_collisions=false
                     if forward_state == "success":
                         self.get_logger().info("\n\033[92m[SUCCESS] Target BA 도달!\033[0m")
                         # Calc Tip Pose
@@ -2416,20 +2777,32 @@ class ControlTower(Node):
                     continue     # 다음 루프로
 
                 self.close_gripper()
-                # [USER REQUEST] Stabilize & Capture Initial Theta
-                import time
-                time.sleep(1.0) 
-                
-                
+
+                # [DATA COLLECTION] 녹화 시작 (collect / inference 모드)
+                if self.run_mode in ('collect', 'inference'):
+                    self.grasp_buffer = []
+                    self.grasp_raw_buffer = []
+                    self.realtime_buffer.clear()
+                    self.inference_frame_cnt  = 0
+                    self.infer_consec_normal  = 0
+                    self.infer_latest_score   = None
+                    self.is_recording = True
+                    self.get_logger().info(f"[DATA] 녹화 시작 (mode={self.run_mode})")
+
                 # --- Retreat Added ---
                 for i in range(5):
                     if self.move_backward(target_ba): # Using new hybrid move_backward
                         break
                     self.get_logger().warn(f"  >> back 실패 ({i+1}/5) → 재시도 중")
                 # 실패해도 일단 진행 (or loop?)
-                
+
                 while not self.goal(self.ba_init, 'keep'):
                     self.get_logger().warn("  >> 실패 → 재시도 중")
+
+                # [DATA COLLECTION] 녹화 종료
+                if self.run_mode in ('collect', 'inference'):
+                    self.is_recording = False
+                    self.get_logger().info(f"[DATA] 녹화 종료: {len(self.grasp_buffer)} 프레임 수집")
 
                 self.get_logger().info(" Z-축 정렬 (Slip Check) 감지")
                 #self.get_logger().info(" Z-축 정렬 (Slip Check) 감지")
@@ -2450,16 +2823,52 @@ class ControlTower(Node):
                 is_not_edge = current_theta < 85.0
                 
                 # Use Relative Logic INSTEAD of self.z_aligned (which uses absolute thresholds)
-                if is_stable and is_valid_norm and is_not_edge and is_grasp:
-                # if True:
-                    #self.get_logger().warn(f" 잡기 성공 (Stable Grasp: Δθ={theta_diff:.1f}°, θ={current_theta:.1f}°, norm={self.norm:.3f}, max_norm = {self.max_norm:.3f})")
-                    self.z_aligned = True
-                    break
+                rule_success = is_stable and is_valid_norm and is_not_edge and is_grasp
+
+                if self.run_mode == 'collect':
+                    # 데이터 수집 모드: 사람 입력으로 로봇 동작 결정
+                    label = self._request_human_label()
+                    if label == 'success':
+                        self.z_aligned = True
+                        break
+                    elif label in ('failure', 'perturbation'):
+                        while not self.open_gripper():
+                            self.get_logger().warn("  >> 그리퍼 오픈 실패 → 재시도 중")
+                    else:
+                        # x (skip): rule-based 결과로 fallback
+                        self.get_logger().info("[DATA] skip → rule-based fallback")
+                        if rule_success:
+                            self.z_aligned = True
+                            break
+                        else:
+                            while not self.open_gripper():
+                                self.get_logger().warn("  >> 그리퍼 오픈 실패 → 재시도 중")
+
+                elif self.run_mode == 'inference':
+                    # 슬라이딩 윈도우 실시간 판단 결과 사용
+                    score = self.infer_latest_score
+                    score_str = f"{score:.4f}" if score is not None else "None"
+                    self.get_logger().info(
+                        f"[INFERENCE] 연속 정상 {self.infer_consec_normal}회 "
+                        f"(needed={self.infer_consec_needed}), 최종 score={score_str}")
+                    if self.infer_consec_normal >= self.infer_consec_needed:
+                        self.get_logger().info("[INFERENCE] 성공 판정")
+                        self.z_aligned = True
+                        break
+                    else:
+                        self.get_logger().warn("[INFERENCE] 실패 판정 → 재시도")
+                        while not self.open_gripper():
+                            self.get_logger().warn("  >> 그리퍼 오픈 실패 → 재시도 중")
+
                 else:
-                    self.get_logger().warn(f" 잡기 실패 (Unstable grasp): Δθ={theta_diff:.1f}°, θ={current_theta:.1f}°, norm={self.norm:.3f}, max_norm = {self.max_norm:.3f})")
-                    self.get_logger().warn(f"   (Criteria: Δ<6.0, θ<85.0, norm>0.35, max norm > 0.5)")
-                    while not self.open_gripper():
-                        self.get_logger().warn("  >> 그리퍼 오픈 실패 → 재시도 중")
+                    # normal 모드: 기존 rule-based 동작
+                    if rule_success:
+                        self.z_aligned = True
+                        break
+                    else:
+                        self.get_logger().warn(f" 잡기 실패: Δθ={theta_diff:.1f}°, θ={current_theta:.1f}°, norm={self.norm:.3f})")
+                        while not self.open_gripper():
+                            self.get_logger().warn("  >> 그리퍼 오픈 실패 → 재시도 중")
 
             if target_ba.pose.position.z == -99.0:
                 self.get_logger().info("🛑 [Overcome] 빈 바구니 감지 (RGB Gate). 작업 종료.")
@@ -2498,12 +2907,12 @@ class ControlTower(Node):
                 self.get_logger().warn(f" Slip Recorded during Motion! (Overcome Trigger)")
             elif is_stable and is_valid_norm and is_not_edge:
                 self.get_logger().warn(f" No slip: Δθ={theta_diff:.1f}°, θ={current_theta:.1f}°), norm={self.norm:.3f}")
-            else:
-                self.get_logger().warn(f" Slip Detected: Δθ={theta_diff:.1f}°, θ={current_theta:.1f}°, norm={self.norm:.3f})")
-                self.get_logger().warn(f"   (Criteria: Δ<6.0, θ<85.0, norm>0.35)")
-                self.contacted = True
+            # else:
+            #     self.get_logger().warn(f" Slip Detected: Δθ={theta_diff:.1f}°, θ={current_theta:.1f}°, norm={self.norm:.3f})")
+            #     self.get_logger().warn(f"   (Criteria: Δ<6.0, θ<85.0, norm>0.35)")
+            #     self.contacted = True
 
-            self.contacted = True
+            # self.contacted = True
             self.open_gripper()
 
             if self.contacted:
@@ -2529,12 +2938,12 @@ class ControlTower(Node):
         marker.header.stamp = self.get_clock().now().to_msg()
         marker.ns = "grasp_target"
         marker.id = id
-        marker.type = Marker.ARROW
+        marker.type = Marker.SPHERE
         marker.action = Marker.ADD
         marker.pose = pose
-        marker.scale.x = 0.03  # arrow length (Longer)
-        marker.scale.y = 0.03 # arrow width (Thicker)
-        marker.scale.z = 0.03 # arrow height (Thicker)
+        marker.scale.x = 0.04  # sphere diameter
+        marker.scale.y = 0.04
+        marker.scale.z = 0.04
         marker.color.a = 1.0
         marker.color.r = r
         marker.color.g = g
@@ -2581,10 +2990,16 @@ class ControlTower(Node):
         self.marker_pub.publish(marker)
 
 def main(args=None):
-    rclpy.init(args=args)
-    
+    parser = argparse.ArgumentParser(description='ControlTower 실행 모드 설정')
+    parser.add_argument('--mode', type=str, default='normal',
+                        choices=['normal', 'collect', 'inference'],
+                        help='normal: rule-based | collect: 데이터 수집 | inference: GRU-AE 판단')
+    parsed, ros_args = parser.parse_known_args()
+
+    rclpy.init(args=ros_args if ros_args else args)
+
     try:
-        node = ControlTower()
+        node = ControlTower(run_mode=parsed.mode)
     except RuntimeError as e:
         print(f"노드 초기화 중 오류 발생: {e}")
         return

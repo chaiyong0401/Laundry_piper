@@ -22,6 +22,9 @@
 #include <moveit/planning_scene/planning_scene.h>                   // PlanningScene (self-collision check)
 
 #include <moveit/kinematic_constraints/utils.h>
+#include <moveit_msgs/srv/get_planning_scene.hpp>       // ACM 읽기
+#include <moveit_msgs/srv/apply_planning_scene.hpp>     // ACM 적용
+#include <moveit/collision_detection/collision_matrix.h> // AllowedCollisionMatrix
 
 // 에러 코드 스트링 변환 헬퍼
 std::string moveit_error_code_to_string(int val) {
@@ -86,6 +89,10 @@ public:
     move_group_->setPoseReferenceFrame(base_frame_);
     move_group_->setEndEffectorLink(ee_link_);
 
+    // Mode 11 JTC 클라이언트 미리 생성 (매 호출마다 생성 시 wait_for_action_server 오버헤드 방지)
+    jtc_client_ = rclcpp_action::create_client<control_msgs::action::FollowJointTrajectory>(
+        this->shared_from_this(), "/arm_controller/follow_joint_trajectory");
+
     velocity_publisher_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
         "/arm_controller/joint_trajectory", 10); // CLIK
 
@@ -147,6 +154,7 @@ private:
   rclcpp::Logger logger_;
   moveit::planning_interface::MoveGroupInterfacePtr move_group_;
   rclcpp_action::Server<ActionT>::SharedPtr server_;
+  rclcpp_action::Client<control_msgs::action::FollowJointTrajectory>::SharedPtr jtc_client_;
   std::string base_frame_, ee_link_, EEE_, DEEP_;
   Eigen::VectorXd previous_error_ = Eigen::VectorXd::Zero(6);
 
@@ -156,8 +164,8 @@ private:
   // -------- 액션 콜백 --------
   rclcpp_action::GoalResponse handle_goal(const rclcpp_action::GoalUUID&,
                                           std::shared_ptr<const ActionT::Goal> goal) {
-    if (goal->mode < 0 || (goal->mode > 9 && goal->mode != 10)) return rclcpp_action::GoalResponse::REJECT;
-    // 모드 늘리면 여기 수정해야함 (현재 0-9, 10 허용) //
+    if (goal->mode < 0 || (goal->mode > 9 && goal->mode != 10 && goal->mode != 11)) return rclcpp_action::GoalResponse::REJECT;
+    // 모드 늘리면 여기 수정해야함 (현재 0-9, 10, 11 허용) //
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
   }
 
@@ -215,26 +223,29 @@ private:
       move_group_->setPoseReferenceFrame(base_frame_);  
       move_group_->setEndEffectorLink(ee_link_);      // OR EEE_
 
-      move_group_->setPlanningPipelineId("");  
-      move_group_->setPlannerId("");           
+      move_group_->setPlanningPipelineId("");
+      move_group_->setPlannerId("");
+      move_group_->setPlanningTime(20.0);
 
-      // 🔎 디버깅 출력
-      RCLCPP_INFO(this->get_logger(),
-                  "[DEBUG] pipeline=%s, planner=%s",
-                  move_group_->getPlanningPipelineId().c_str(),
-                  move_group_->getPlannerId().c_str());
-
-      auto cs = make_rpy_constraint(goal->roll_tol_rad, goal->pitch_tol_rad, goal->yaw_tol_rad);
-      move_group_->setPathConstraints(cs);
+      // rpy_tol이 모두 2π 이상이면 path constraint 완전 제거 (constraint 자체가 OMPL 성능 저하)
+      bool use_constraint = (goal->roll_tol_rad < 6.0 || goal->pitch_tol_rad < 6.0 || goal->yaw_tol_rad < 6.0);
+      if (use_constraint) {
+        auto cs = make_rpy_constraint(goal->roll_tol_rad, goal->pitch_tol_rad, goal->yaw_tol_rad);
+        move_group_->setPathConstraints(cs);
+        RCLCPP_INFO(logger_, "[MODE 1] Path constraint 적용: [%.2f, %.2f, %.2f] rad",
+                    goal->roll_tol_rad, goal->pitch_tol_rad, goal->yaw_tol_rad);
+      } else {
+        RCLCPP_INFO(logger_, "[MODE 1] Path constraint 없음 (free orientation)");
+      }
 
       move_group_->setPositionTarget(
         goal->target_pose.pose.position.x,
         goal->target_pose.pose.position.y,
         goal->target_pose.pose.position.z,
-        ee_link_); // OR EEE_
-        
-      ok = plan_and_exec(); // debug
-      msg = ok ? "SUCCESS(M1)" : "FAILED(M1)"; //debug
+        ee_link_);
+
+      ok = plan_and_exec();
+      msg = ok ? "SUCCESS(M1)" : "FAILED(M1)";
 
       move_group_->clearPathConstraints();
     } 
@@ -344,7 +355,8 @@ private:
               std::vector<double> q; sol.copyJointGroupPositions(jmg, q);
               FTJ::Goal goal_msg; goal_msg.trajectory.joint_names = move_group_->getJointNames();
               trajectory_msgs::msg::JointTrajectoryPoint p; p.positions = q;
-              p.time_from_start = rclcpp::Duration::from_seconds(3.0);
+              double jtc_dur6 = std::max(0.8, std::min(1.5 / v_scale, 10.0));
+              p.time_from_start = rclcpp::Duration::from_seconds(jtc_dur6);
               goal_msg.trajectory.points.push_back(p);
               auto gh = jtc_client->async_send_goal(goal_msg).get();
               if (!gh) { ok = false; msg = "JTC rejected"; }
@@ -480,10 +492,8 @@ private:
 
               trajectory_msgs::msg::JointTrajectoryPoint p;
               p.positions = q;
-              builtin_interfaces::msg::Duration tfs;
-              tfs.sec     = 3;
-              tfs.nanosec = 0;
-              p.time_from_start = tfs;
+              double jtc_dur7 = std::max(0.8, std::min(1.5 / v_scale, 10.0));
+              p.time_from_start = rclcpp::Duration::from_seconds(jtc_dur7);
               goal_msg.trajectory.points.push_back(p);
 
               auto gh = jtc_client->async_send_goal(goal_msg).get();
@@ -666,6 +676,15 @@ private:
 
         if (!resp || resp->error_code.val != resp->error_code.SUCCESS) {
           std::string err_str = (resp) ? moveit_error_code_to_string(resp->error_code.val) : "null response";
+          // --- 실패 원인 진단: collision 없이 재시도하여 joint limit vs collision 구분 ---
+          auto req_no_col = std::make_shared<moveit_msgs::srv::GetPositionIK::Request>(*req);
+          req_no_col->ik_request.avoid_collisions = false;
+          auto resp_no_col = ik_client->async_send_request(req_no_col).get();
+          if (resp_no_col && resp_no_col->error_code.val == resp_no_col->error_code.SUCCESS) {
+            RCLCPP_ERROR(logger_, "[MODE 10] IK 실패 원인: 환경 충돌 (collision-free IK는 성공). 바구니/장애물과 충돌하는 자세입니다.");
+          } else {
+            RCLCPP_ERROR(logger_, "[MODE 10] IK 실패 원인: Joint limit 초과 또는 Workspace 밖 (collision 없이도 IK 불가).");
+          }
           RCLCPP_ERROR(logger_, "IK Mode 10 failed, code=%d (%s)", (resp ? resp->error_code.val : 0), err_str.c_str());
           ok = false; msg = "IK failed (Env collision or no solution): " + err_str;
         } else {
@@ -686,7 +705,8 @@ private:
             std::vector<double> q; sol.copyJointGroupPositions(jmg, q);
             FTJ::Goal goal_msg; goal_msg.trajectory.joint_names = move_group_->getJointNames();
             trajectory_msgs::msg::JointTrajectoryPoint p; p.positions = q;
-            p.time_from_start = rclcpp::Duration::from_seconds(3.0);
+            double jtc_dur10 = std::max(0.8, std::min(1.5 / v_scale, 10.0));
+            p.time_from_start = rclcpp::Duration::from_seconds(jtc_dur10);
             goal_msg.trajectory.points.push_back(p);
             auto gh = jtc_client->async_send_goal(goal_msg).get();
             if (!gh) { ok = false; msg = "JTC rejected"; }
@@ -701,8 +721,65 @@ private:
     }
 
  
+    else if (goal->mode == 11) {  // Cartesian 직선 + 직접 JTC
+      // 그리퍼 링크(link6/gripper_base/link7/link8)만 drum 충돌 허용 (ACM)
+      // 나머지 링크(link1~5)는 여전히 충돌 체크
+      RCLCPP_WARN(logger_, "[MODE 11] Cartesian straight line, gripper-drum ACM bypass, direct JTC");
+
+      move_group_->setEndEffectorLink(DEEP_);
+      move_group_->setPoseReferenceFrame(base_frame_);
+
+      const auto cur = move_group_->getCurrentPose(DEEP_).pose;
+      geometry_msgs::msg::Pose target = cur;
+      target.position  = goal->target_pose.pose.position;
+      // orientation은 현재 EE orientation 유지 (Python에서 보낸 값과 미세한 차이로 회전이 생기는 문제 방지)
+      target.orientation = cur.orientation;
+
+      RCLCPP_INFO(logger_, "[MODE 11] cur  orientation: x=%.4f y=%.4f z=%.4f w=%.4f",
+                  cur.orientation.x, cur.orientation.y, cur.orientation.z, cur.orientation.w);
+      RCLCPP_INFO(logger_, "[MODE 11] goal orientation: x=%.4f y=%.4f z=%.4f w=%.4f",
+                  target.orientation.x, target.orientation.y, target.orientation.z, target.orientation.w);
+
+      std::vector<geometry_msgs::msg::Pose> waypoints = {target};
+
+      // avoid_collisions=false 이므로 ACM 수정 불필요
+      moveit_msgs::msg::RobotTrajectory trajectory;
+      moveit_msgs::msg::MoveItErrorCodes error_code;
+      double fraction = move_group_->computeCartesianPath(
+          waypoints,
+          0.005,  // eef_step: 5mm
+          0.0,    // jump_threshold: disabled
+          trajectory,
+          false,  // avoid_collisions=false: Cartesian 직선이므로 물리적으로 안전
+          &error_code
+      );
+
+      RCLCPP_INFO(logger_, "[MODE 11] Cartesian path fraction: %.2f", fraction);
+
+      if (fraction < 0.9) {
+        RCLCPP_ERROR(logger_, "[MODE 11] Cartesian path 실패 (fraction=%.2f, code=%d)", fraction, error_code.val);
+        ok = false;
+        msg = "CartesianPath failed (fraction=" + std::to_string(fraction) + ")";
+      } else {
+        using FTJ = control_msgs::action::FollowJointTrajectory;
+        if (!jtc_client_->wait_for_action_server(std::chrono::seconds(2))) {
+          ok = false; msg = "JTC unavailable";
+        } else {
+          FTJ::Goal jtc_goal;
+          jtc_goal.trajectory = trajectory.joint_trajectory;
+          auto gh = jtc_client_->async_send_goal(jtc_goal).get();
+          if (!gh) { ok = false; msg = "JTC rejected"; }
+          else {
+            auto wrapped = jtc_client_->async_get_result(gh).get();
+            ok  = (wrapped.code == rclcpp_action::ResultCode::SUCCEEDED);
+            msg = ok ? "SUCCESS(Cart→JTC)" : "FAILED(JTC exec)";
+          }
+        }
+      }
+    }
+
     //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-    //  ZZAM TONG  ////  ZZAM TONG  ////  ZZAM TONG  ////  ZZAM TONG  ////  ZZAM TONG  ////  ZZAM TONG  ////  ZZAM TONG  ////  ZZAM TONG  
+    //  ZZAM TONG  ////  ZZAM TONG  ////  ZZAM TONG  ////  ZZAM TONG  ////  ZZAM TONG  ////  ZZAM TONG  ////  ZZAM TONG  ////  ZZAM TONG
     //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     else if (goal->mode == 13) {

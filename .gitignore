@@ -13,6 +13,7 @@ rosbag2_*/
 
 # Model checkpoints & weights
 act_learning/ckpts/
+act_learning/data/
 Laundry_decision/run_bf/checkpoints/
 Laundry_decision/run_laundry/models/
 Laundry_decision/sam2/

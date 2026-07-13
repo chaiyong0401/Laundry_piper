@@ -28,7 +28,16 @@ arm_controller:
     state_interfaces:
       - position
       - velocity
-    
+    constraints:
+      goal_time: 1.0
+      stopped_velocity_tolerance: 0.05
+      joint1: { goal: 0.05 }
+      joint2: { goal: 0.05 }
+      joint3: { goal: 0.05 }
+      joint4: { goal: 0.05 }
+      joint5: { goal: 0.05 }
+      joint6: { goal: 0.05 }
+
 gripper_controller:
   ros__parameters:
     joints:

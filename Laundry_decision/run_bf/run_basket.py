@@ -5,17 +5,17 @@ python run_basket.py \
   --intr_json /home/dyros/mcy_ws/Laundry_decision/run_bf/intrinsics_color_640x480.json \
   --mode basket \
   --size 384 --thr 0.45 \
-  --zmax_basket 0.6 --zmax_failure 0.5 \
+  --zmax_basket 0.35 --zmax_failure 0.5 \
   --diff_mode bilateral \
   --vote --vote_k 10 --vote_min_area 150 --vote_min_dt 3 --vote_require_curr \
-  --bg_path /home/dyros/mcy_ws/Laundry_decision/run_bg/laundry_bg/bg_basket.npy \ 
+  --bg_path /home/dyros/mcy_ws/Laundry_decision/run_bg/laundry_bg/bg_basket.npy \
 
   python run_basket.py \
   --ckpt /home/dyros/mcy_ws/Laundry_decision/run_bf/dataset_rgb_sam2/unet_best_multi.pt \
   --intr_json /home/dyros/mcy_ws/Laundry_decision/run_bf/intrinsics_color_640x480.json \
   --mode basket \
   --size 384 --thr 0.45 \
-  --zmax_basket 0.6 --zmax_failure 0.5 \
+  --zmax_basket 0.35 --zmax_failure 0.5 \
   --diff_mode bilateral \
   --vote --vote_k 10 --vote_min_area 150 --vote_min_dt 3 --vote_require_curr \
   --bg_path /home/dyros/mcy_ws/Laundry_decision/run_bg/laundry_bg/bg_basket.npy \ 
@@ -26,7 +26,7 @@ python realtime_grasp_runner_rgb2_gated.py \
   --ckpt .../unet_best_multi.pt --intr_json .../intrinsics_depth_640x480.json \
   --mode failure --json --max_wait_sec 3.0 --vote --vote_k 10
 """
-from pathlib import Path  
+from pathlib import Path
 import os, json, time, argparse, math
 from collections import deque
 import numpy as np
@@ -35,6 +35,23 @@ import torch, torch.nn as nn
 
 from sklearn.cluster import MeanShift
 from collections import defaultdict
+
+# ── 사전 로드 캐시 ─────────────────────────────────
+_PRELOADED: dict = {}  # {net, dev}
+_active_pipeline = None  # 현재 실행 중인 rs.pipeline (in-process 정리용)
+
+def preload(ckpt_path: str, device: str = 'cpu') -> None:
+    """node2.py __init__에서 호출: 모델 가중치를 프로세스 메모리에 한번만 로드."""
+    dev = torch.device(device)
+    ckpt = torch.load(ckpt_path, map_location='cpu')
+    c_in = int(ckpt.get('c_in', 6))
+    base = int(ckpt.get('base', 32))
+    use_se = bool(ckpt.get('use_se', True))
+    net = TinyUNet(c_in=c_in, base=base, use_se=use_se).to(dev)
+    net.load_state_dict(ckpt['model'])
+    net.eval()
+    _PRELOADED.update({'net': net, 'dev': dev})
+    print(f"[preload] run_basket 완료 (device={device})")
 
 # ---------------- Model (TinyUNet) ----------------
 class SE(nn.Module):
@@ -490,12 +507,13 @@ def create_4panel_grid(view, diff, mask, z=None):
 
 # --------------- Main -------------------
 def main():
+    global _active_pipeline
     ap = argparse.ArgumentParser()
     ap.add_argument('--ckpt', default='/home/dyros/mcy_ws/Laundry_decision/run_bf/dataset_rgb_sam2/unet_best_multi.pt')
     ap.add_argument('--intr_json', default='intrinsics_color_640x480.json')
     ap.add_argument('--mode', choices=['basket','failure'], default='basket')
     ap.add_argument('--size', type=int, default=384)
-    ap.add_argument('--zmax_basket', type=float, default=0.6)
+    ap.add_argument('--zmax_basket', type=float, default=0.35)
     ap.add_argument('--zmax_failure', type=float, default=0.5)
     ap.add_argument('--thr', type=float, default=0.45)
     ap.add_argument('--device', default='cuda')
@@ -525,23 +543,27 @@ def main():
     ap.add_argument('--max_wait_sec', type=float, default=3.0, help='--json 모드 최대 대기')
 
     # debug_mcy color
-    # ap.add_argument('--color_bandwidth', type=float, default=30.0,
-    #                     help='색상 클러스터링 민감도 (값이 작을수록 잘게 쪼갬)')
+    ap.add_argument('--color_bandwidth', type=float, default=30.0,
+                        help='색상 클러스터링 민감도 (값이 작을수록 잘게 쪼갬)')
+    ap.add_argument('--no_basket_mask', action='store_true',
+                        help='바구니 내부 마스크 적용 안 함 (바구니 없는 환경)')
     ###
 
     args = ap.parse_args()
 
-    dev = torch.device(args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'))
-
-    # load ckpt & build net
-    ckpt = torch.load(args.ckpt, map_location='cpu')
-    meta = ckpt
-    c_in = int(meta.get('c_in', 6))
-    base = int(meta.get('base', 32))
-    use_se = bool(meta.get('use_se', True))
-    net = TinyUNet(c_in=c_in, base=base, use_se=use_se).to(dev)
-    net.load_state_dict(meta['model'])
-    net.eval()
+    # 사전 로드된 모델 사용 (node2.py preload() 호출 시); 없으면 직접 로드
+    if _PRELOADED:
+        net = _PRELOADED['net']
+        dev = _PRELOADED['dev']
+    else:
+        dev = torch.device(args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'))
+        ckpt = torch.load(args.ckpt, map_location='cpu')
+        c_in = int(ckpt.get('c_in', 6))
+        base = int(ckpt.get('base', 32))
+        use_se = bool(ckpt.get('use_se', True))
+        net = TinyUNet(c_in=c_in, base=base, use_se=use_se).to(dev)
+        net.load_state_dict(ckpt['model'])
+        net.eval()
 
     fx, fy, ppx, ppy = load_intrinsics(args.intr_json)
 
@@ -557,7 +579,8 @@ def main():
     config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
     config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
     profile = pipeline.start(config)
-    
+    _active_pipeline = pipeline  # in-process 호출 중단 시 강제 정리용
+
     # --- Explicit Auto-Exposure & White-Balance (User Request) ---
     device = profile.get_device()
     for sensor in device.query_sensors():
@@ -902,12 +925,15 @@ def main():
 
             return inside
 
-        basket_contour_path = "/home/dyros/mcy_ws/Laundry_decision/run_bf/eh_basket_dbg/mask_41_boundaryfill.png"
-        basket_inside = load_basket_inside_mask(basket_contour_path)
         save_path = "/home/dyros/mcy_ws/Laundry_decision/run_bf/eh_basket_dbg/run/debugging.png"
 
         mask_init = postprocess_mask(z, thr, (H, W))
-        mask = mask_init & basket_inside
+        if args.no_basket_mask:
+            mask = mask_init
+        else:
+            basket_contour_path = "/home/dyros/mcy_ws/Laundry_decision/run_bf/eh_basket_dbg/mask_41_boundaryfill.png"
+            basket_inside = load_basket_inside_mask(basket_contour_path)
+            mask = mask_init & basket_inside
         # mask_init과 mask가 겹치는 영역이 mask_init의 몇 퍼센트인지 계산.
         mask_init_bool = mask_init.astype(bool)
         mask_bool = mask.astype(bool)
@@ -945,7 +971,8 @@ def main():
 
             return (cx, cy)
 
-        center = find_center(mask)
+        # centroid 
+        # center = find_center(mask)
 
         # --- 현재 프레임 ---
         accepted = False
@@ -1115,6 +1142,7 @@ def main():
             break
 
     pipeline.stop()
+    _active_pipeline = None  # 정상 종료 시 핸들 해제
     if not args.json:
         cv2.destroyAllWindows()
     if args.json and not result_printed:
@@ -1146,8 +1174,80 @@ def main():
     #     with torch.no_grad():
     #         z = net(x.float())
 
+        
+    #     def load_basket_inside_mask(png_path, target_shape=None, dilate_iter=1):
+    #         """
+    #         Load basket boundary PNG and return filled inside mask (bool).
+
+    #         Args:
+    #             png_path: path to basket boundary png
+    #             target_shape: (H, W) of segmentation mask (optional)
+    #             dilate_iter: dilation iterations to close small gaps
+
+    #         Returns:
+    #             inside_mask (bool numpy array)
+    #         """
+
+    #         # 1️⃣ load grayscale
+    #         basket = cv2.imread(png_path, cv2.IMREAD_GRAYSCALE)
+    #         if basket is None:
+    #             raise ValueError(f"Failed to load basket mask: {png_path}")
+
+    #         # 2️⃣ binarize
+    #         basket = basket > 127
+    #         basket = basket.astype(np.uint8)
+
+    #         # 3️⃣ optional dilation to close small gaps
+    #         if dilate_iter > 0:
+    #             kernel = np.ones((3, 3), np.uint8)
+    #             basket = cv2.dilate(basket, kernel, iterations=dilate_iter)
+
+    #         # 4️⃣ resize if needed
+    #         if target_shape is not None:
+    #             H, W = target_shape
+    #             if basket.shape != (H, W):
+    #                 basket = cv2.resize(
+    #                     basket,
+    #                     (W, H),
+    #                     interpolation=cv2.INTER_NEAREST
+    #                 )
+
+    #         # 5️⃣ find contours
+    #         contours, _ = cv2.findContours(
+    #             basket,
+    #             cv2.RETR_EXTERNAL,
+    #             cv2.CHAIN_APPROX_SIMPLE
+    #         )
+
+    #         if len(contours) == 0:
+    #             raise ValueError("No contour found in basket mask.")
+
+    #         # 6️⃣ fill inside
+    #         inside = np.zeros_like(basket)
+    #         cv2.drawContours(
+    #             inside,
+    #             contours,
+    #             -1,
+    #             1,
+    #             thickness=cv2.FILLED
+    #         )
+
+    #         # 7️⃣ remove boundary itself
+    #         inside = inside.astype(bool)
+    #         boundary = basket.astype(bool)
+    #         inside = inside & (~boundary)
+
+    #         return inside
+
+    #     basket_contour_path = "/home/dyros/mcy_ws/Laundry_decision/run_bf/eh_basket_dbg/mask_41_boundaryfill.png"
+    #     basket_inside = load_basket_inside_mask(basket_contour_path)
+    #     save_path = "/home/dyros/mcy_ws/Laundry_decision/run_bf/eh_basket_dbg/run/debugging.png"
+
+
     #     # 1. 딥러닝 마스크 생성
-    #     mask = postprocess_mask(z, thr, (H, W))
+    #     # mask = postprocess_mask(z, thr, (H, W))
+    #     mask_init = postprocess_mask(z, thr, (H, W))                                                       
+    #     mask = mask_init & basket_inside 
 
     #     # 2. 마스크 내부를 색상으로 분리하여 3D 좌표 리스트 받기
     #     all_xyz_coords = find_clusters_by_color(

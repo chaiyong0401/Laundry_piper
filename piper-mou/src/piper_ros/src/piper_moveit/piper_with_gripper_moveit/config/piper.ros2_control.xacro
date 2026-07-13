@@ -11,6 +11,7 @@
                 <plugin>topic_based_ros2_control/TopicBasedSystem</plugin>
                 <param name="joint_commands_topic">/joint_ctrl_single</param>
                 <param name="joint_states_topic">/joint_states</param>
+                <param name="trigger_joint_command_threshold">0.01</param>
               </xacro:if>
 
               <!-- for Sim -->

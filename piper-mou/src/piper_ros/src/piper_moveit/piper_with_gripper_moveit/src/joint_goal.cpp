@@ -77,9 +77,14 @@ private:
         const auto goal = goal_handle->get_goal();
         auto result = std::make_shared<FollowJointTrajectory::Result>();
         const auto &target_point = goal->trajectory.points.back();
-        
+
+        // stop()이나 cancel 후 MoveGroupInterface 내부 상태가 오염될 수 있으므로
+        // 매 goal마다 start state를 현재 state로 명시적으로 리셋
+        move_group_->setStartStateToCurrentState();
+        move_group_->clearPathConstraints();
+        move_group_->clearPoseTargets();
         move_group_->setJointValueTarget(target_point.positions);
-        
+
         moveit::planning_interface::MoveGroupInterface::Plan my_plan;
         if (move_group_->plan(my_plan) == moveit::core::MoveItErrorCode::SUCCESS) {
             if (move_group_->execute(my_plan) == moveit::core::MoveItErrorCode::SUCCESS) {

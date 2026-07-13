@@ -2,15 +2,20 @@ from moveit_configs_utils import MoveItConfigsBuilder
 from moveit_configs_utils.launches import generate_demo_launch
 from launch_ros.actions import Node
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, TimerAction, ExecuteProcess
 from launch.substitutions import LaunchConfiguration
+from launch.conditions import IfCondition, UnlessCondition
 
 def generate_launch_description():
     # Declare argument
     declared_arguments = [
-        DeclareLaunchArgument("real", default_value="false", description="real robot OR sim")
+        DeclareLaunchArgument("real", default_value="false", description="real robot OR sim"),
+        DeclareLaunchArgument("scene2", default_value="false", description="use planning_scene2 (robot+washer+desk lowered 35cm)"),
+        DeclareLaunchArgument("add_basket", default_value="true", description="add basket collision objects to planning scene"),
     ]
-    real = LaunchConfiguration("real")
+    real       = LaunchConfiguration("real")
+    scene2     = LaunchConfiguration("scene2")
+    add_basket = LaunchConfiguration("add_basket")
 
 
     moveit_config = (
@@ -26,7 +31,18 @@ def generate_launch_description():
         package="piper_with_gripper_moveit",
         executable="planning_scene_node",
         name="planning_scene_node",
-        output="screen"
+        output="screen",
+        parameters=[{"add_basket": add_basket}],
+        condition=UnlessCondition(scene2)
+    )
+
+    planning_scene2_node = Node(
+        package="piper_with_gripper_moveit",
+        executable="planning_scene2_node",
+        name="planning_scene_node",
+        output="screen",
+        parameters=[{"add_basket": add_basket}],
+        condition=IfCondition(scene2)
     )
     
     # 추가 노드: pose_goal_node
@@ -59,7 +75,22 @@ def generate_launch_description():
         ld.add_action(action)
 
     ld.add_action(planning_scene_node)
+    ld.add_action(planning_scene2_node)
     ld.add_action(pose_goal_node)
-    ld.add_action(joint_goal_node) 
+    ld.add_action(joint_goal_node)
+
+    # 컨트롤러 초기화 후 그리퍼 오픈 (5초 지연)
+    open_gripper_cmd = ExecuteProcess(
+        cmd=[
+            'ros2', 'action', 'send_goal',
+            '/gripper_controller/follow_joint_trajectory',
+            'control_msgs/action/FollowJointTrajectory',
+            '{"trajectory": {"joint_names": ["joint7", "joint8"], '
+            '"points": [{"positions": [0.03, 0.03], '
+            '"time_from_start": {"sec": 1, "nanosec": 0}}]}}'
+        ],
+        output='screen'
+    )
+    ld.add_action(TimerAction(period=5.0, actions=[open_gripper_cmd]))
 
     return ld

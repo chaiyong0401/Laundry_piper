@@ -3,21 +3,22 @@ import os
 
 # HACK: Remove ROS python path to prefer Conda's OpenCV/NumPy
 # ROS Humble usually adds /opt/ros/humble/lib/python3.10/site-packages
-to_remove = [p for p in sys.path if 'opt/ros' in p]
-for p in to_remove:
+# Save original (index, path) pairs to restore at exact positions
+_ros_paths = [(i, p) for i, p in enumerate(sys.path) if 'opt/ros' in p]
+for _, p in reversed(_ros_paths):
     sys.path.remove(p)
 
 import torch
 import numpy as np
 import cv2
 
-# Restore ROS path for rclpy
-for p in to_remove:
-    sys.path.append(p)
+# Restore ROS paths at their original positions (not appended to end)
+for i, p in _ros_paths:
+    sys.path.insert(i, p)
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image, JointState
+from sensor_msgs.msg import CompressedImage, JointState
 import threading
 import time
 
@@ -27,23 +28,25 @@ from act_learning.policy_full import ACTPolicyBaseline
 from act_learning.utils import PiperDataset 
 
 class ACTFullInferenceNode(Node):
-    def __init__(self):
+    def __init__(self, ckpt_path='/home/dyros/mcy_ws/act_learning/ckpts/policy_full_last.ckpt',
+                 init_pose=False, init_data_path='', init_vel=10.0, init_thr=0.05):
         super().__init__('act_full_inference')
-        
+        self.init_pose      = init_pose
+        self.init_data_path = init_data_path
+        self.init_vel       = init_vel
+        self.init_thr       = init_thr
+        self.ready          = not init_pose
+
         # Device Check
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.get_logger().info(f"Loading FULL model on {self.device}...")
         if self.device.type == 'cpu':
             self.get_logger().warn("Running FULL model on CPU. Latency might be high.")
-        
-        # Load Checkpoint
-        # Assuming user copies the file to this location
-        ckpt_path = '/home/dyros/mcy_ws/act_learning/ckpts/policy_full_last.ckpt'
-        
+
         try:
             checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
         except FileNotFoundError:
-            self.get_logger().error(f"Checkpoint not found at {ckpt_path}. Please copy it from your training PC.")
+            self.get_logger().error(f"Checkpoint not found: {ckpt_path}")
             raise SystemExit
             
         self.config = checkpoint['config']
@@ -59,18 +62,23 @@ class ACTFullInferenceNode(Node):
         # self.cv_bridge = CvBridge()
         
         # Subs
-        self.image_sub = self.create_subscription(
-            Image, '/camera/camera/color/image_raw', self.image_callback, 1)
+        from rclpy.qos import qos_profile_sensor_data
         self.joint_sub = self.create_subscription(
-            JointState, '/follower/joint_states', self.joint_callback, 1)
-            
+            JointState, '/joint_states', self.joint_callback, 1)
+
+        # 카메라: compressed topic (~50KB JPEG) — raw(2.7MB)보다 DDS 전달 안정적
+        self.image_sub = self.create_subscription(
+            CompressedImage, '/camera/camera/color/image_raw/compressed',
+            self.image_callback, qos_profile_sensor_data)
+
         # Pub
         self.action_pub = self.create_publisher(
-            JointState, '/follower/joint_ctrl_single', 10)
+            JointState, '/joint_ctrl_single', 10)
             
         # Buffers
         self.curr_image = None
         self.curr_qpos = None
+        self.joint_names = None
         self.lock = threading.Lock()
         
         # Action Buffer for Interpolation
@@ -89,24 +97,26 @@ class ACTFullInferenceNode(Node):
         self.inference_thread = threading.Thread(target=self.inference_loop)
         self.inference_thread.daemon = True
         self.inference_thread.start()
-        
+
+        # 1-b. Init pose thread (init_pose=True 일 때만 동작)
+        if self.init_pose:
+            init_thread = threading.Thread(target=self.init_pose_loop)
+            init_thread.daemon = True
+            init_thread.start()
+
         # 2. Control Timer (High Frequency 100Hz)
-        self.control_timer = self.create_timer(0.01, self.control_loop) 
+        self.control_timer = self.create_timer(0.01, self.control_loop)
         
     def image_callback(self, msg):
+        self.get_logger().info(
+            f"[IMG CB] format={msg.format} data_len={len(msg.data)}",
+            throttle_duration_sec=2.0)
         try:
-            # Manual bridge
-            dtype = np.uint8
-            n_channels = 3
-            if msg.encoding in ['bgr8', 'rgb8']:
-                img_arr = np.array(msg.data, dtype=dtype).reshape(msg.height, msg.width, n_channels)
-                img_arr = np.ascontiguousarray(img_arr)
-                if msg.encoding == 'rgb8':
-                     img_arr = cv2.cvtColor(img_arr, cv2.COLOR_RGB2BGR)
-                cv_img = img_arr
-            else:
-                 return
-
+            buf = np.frombuffer(msg.data, dtype=np.uint8)
+            cv_img = cv2.imdecode(buf, cv2.IMREAD_COLOR)  # -> BGR
+            if cv_img is None:
+                self.get_logger().warn("[IMG CB] imdecode 실패")
+                return
             cv_img = cv2.resize(cv_img, (320, 240))
             with self.lock:
                 self.curr_image = cv_img
@@ -115,6 +125,7 @@ class ACTFullInferenceNode(Node):
 
     def joint_callback(self, msg):
         with self.lock:
+            self.joint_names = list(msg.name)
             self.curr_qpos = np.array(msg.position)
 
     def normalize(self, data, stats_key):
@@ -127,6 +138,50 @@ class ACTFullInferenceNode(Node):
         std = self.stats[f'{stats_key}_std']
         return data * std + mean
 
+    def init_pose_loop(self):
+        """학습 데이터 첫 에피소드 첫 프레임 qpos로 로봇을 이동."""
+        import h5py, glob
+        files = sorted(glob.glob(os.path.join(self.init_data_path, "*.h5")))
+        if not files:
+            self.get_logger().error(f"[Init] h5 파일 없음: {self.init_data_path}")
+            self.ready = True
+            return
+
+        with h5py.File(files[0], 'r') as f:
+            target = np.array(f['observations/qpos'][0])
+        self.get_logger().info(f"[Init] 에피소드: {os.path.basename(files[0])}")
+        self.get_logger().info(f"[Init] 목표 자세: {target.round(3)}")
+        self.get_logger().info(f"[Init] 속도 {self.init_vel}% 로 이동 시작...")
+
+        rate_s = 0.02  # 50Hz
+        while rclpy.ok():
+            with self.lock:
+                qpos = self.curr_qpos
+                names = self.joint_names
+            if qpos is None:
+                time.sleep(rate_s)
+                continue
+
+            err = np.abs(target - qpos)
+            self.get_logger().info(
+                f"[Init] max_err={err.max():.4f}  thr={self.init_thr}",
+                throttle_duration_sec=1.0)
+
+            # 목표 자세 퍼블리시
+            msg = JointState()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.name = names if names else \
+                       ["joint1","joint2","joint3","joint4","joint5","joint6","joint7","joint8"]
+            msg.position = target.tolist()
+            msg.velocity = [self.init_vel] * len(target)
+            self.action_pub.publish(msg)
+
+            if err.max() < self.init_thr:
+                self.get_logger().info("[Init] 목표 자세 도달! 추론 시작.")
+                self.ready = True
+                break
+            time.sleep(rate_s)
+
     def inference_loop(self):
         # Runs in background, updates self.action_queue
         while rclpy.ok():
@@ -135,6 +190,10 @@ class ACTFullInferenceNode(Node):
                 qpos = self.curr_qpos
             
             if img is None or qpos is None:
+                self.get_logger().warn(
+                    f"Waiting for data... image={'OK' if img is not None else 'MISSING'}  "
+                    f"qpos={'OK' if qpos is not None else 'MISSING'}",
+                    throttle_duration_sec=2.0)
                 time.sleep(0.1)
                 continue
                 
@@ -155,6 +214,13 @@ class ACTFullInferenceNode(Node):
                 chunk_norm = action_preds[0].cpu().numpy()
                 chunk = self.unnormalize(chunk_norm, 'qpos')
                 
+                t_infer = time.time() - t0
+                self.get_logger().info(
+                    f"Inference OK  {1.0/max(t_infer,1e-4):.1f} Hz\n"
+                    f"  current : {qpos.round(3)}\n"
+                    f"  action[0]: {chunk[0].round(3)}",
+                    throttle_duration_sec=1.0)
+
                 # Add to Temporal Ensemble Buffer
                 with self.lock:
                     if self.action_chunk is None:
@@ -171,11 +237,14 @@ class ACTFullInferenceNode(Node):
             time.sleep(0.01)
 
     def control_loop(self):
+        if not self.ready:
+            return
+
         # Temporal Ensembling
         with self.lock:
             chunk_list = self.action_chunk
             curr_qpos = self.curr_qpos
-            
+
         if chunk_list is None or not chunk_list or curr_qpos is None:
             return
             
@@ -221,9 +290,12 @@ class ACTFullInferenceNode(Node):
         # Publish
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.name = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "joint8"]
+        with self.lock:
+            names = self.joint_names
+        msg.name = names if names else \
+                   ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7", "joint8"]
         msg.position = target_action.tolist()
-        msg.velocity = [0.0] * len(target_action)
+        msg.velocity = [20.0] * len(target_action)
         
         self.action_pub.publish(msg)
         
@@ -260,14 +332,33 @@ class ACTFullInferenceNode(Node):
         print("Saved inference_analysis.png")
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = ACTFullInferenceNode()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--ckpt_path', type=str,
+                        default='/home/dyros/mcy_ws/act_learning/ckpts/policy_full_last.ckpt')
+    parser.add_argument('--init_pose', action='store_true',
+                        help='추론 전 학습 데이터 첫 프레임 자세로 로봇 이동')
+    parser.add_argument('--init_data_path', type=str,
+                        default='/home/dyros/mcy_ws/act_learning/data',
+                        help='초기 자세를 읽을 h5 데이터 폴더')
+    parser.add_argument('--init_vel',  type=float, default=10.0,
+                        help='초기 이동 속도 %% (default: 10)')
+    parser.add_argument('--init_thr',  type=float, default=0.05,
+                        help='도달 판정 오차 rad (default: 0.05)')
+    parsed, ros_args = parser.parse_known_args()
+
+    rclpy.init(args=ros_args)
+    node = ACTFullInferenceNode(ckpt_path=parsed.ckpt_path,
+                                init_pose=parsed.init_pose,
+                                init_data_path=parsed.init_data_path,
+                                init_vel=parsed.init_vel,
+                                init_thr=parsed.init_thr)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        node.save_plot() # Plot on exit
+        node.save_plot()
         node.destroy_node()
         rclpy.shutdown()
 

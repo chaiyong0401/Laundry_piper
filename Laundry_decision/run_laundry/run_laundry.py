@@ -2,7 +2,7 @@
 python run_laundry.py   --mode wm   --rgb_ckpt /home/cheon/Documents/gd_0808/models/best.pt   --rgb_thr 0.60 --rgb_low_thr 0.45 --json
 
 '''
-import argparse, time, cv2, numpy as np, pyrealsense2 as rs, open3d as o3d
+import argparse, time, cv2, numpy as np
 from PIL import Image
 import torch, torch.nn as nn
 import torch.nn.functional as F
@@ -10,15 +10,27 @@ from torchvision import transforms as T
 from PIL import Image
 import sys, json, time
 
-
 from detector.rgb_classifier   import RGBOnlyClassifier
-from detector.utils            import (get_current_pointcloud, load_and_crop_pcd,
-                                       align_icp, to_open3d_pcd, split_clusters_by_color_lab)
-from detector.zscore_detector  import (detect_anomalies_adaptive,
-                                       cluster_and_get_targets,
-                                       visualize_pointcloud_with_garments_open3d, split_colorful_clusters)
+
+# open3d / pyrealsense2 / detector 서브모듈은 ROS2 환경에서 import 시
+# OpenSSL 버전 충돌을 일으키므로 run() 호출 시점에 lazy import 함.
+rs  = None
+o3d = None
+get_current_pointcloud = load_and_crop_pcd = align_icp = to_open3d_pcd = None
+split_clusters_by_color_lab = None
+detect_anomalies_adaptive = cluster_and_get_targets = None
+visualize_pointcloud_with_garments_open3d = split_colorful_clusters = None
+# ── 사전 로드 캐시 ─────────────────────────────────
+_PRELOADED: dict = {}  # {rgb_gate}
+
+def preload(rgb_ckpt: str, device: str = 'cpu') -> None:
+    """node2.py __init__에서 호출: RGB 분류 모델을 프로세스 메모리에 한번만 로드."""
+    rgb_gate = _RGBGate(rgb_ckpt, device_str=device)
+    _PRELOADED.update({'rgb_gate': rgb_gate})
+    print(f"[preload] run_laundry 완료 (device={device})")
+
 # wm global var
-Z_MIN, Z_MAX = 0.47, 0.90
+Z_MIN, Z_MAX = 0.35, 0.65
 CYL_RADIUS = 0.29
 FILTER_RADIUS = 0.285
 
@@ -28,8 +40,8 @@ CFG = {
         "z_crop"       : (0.6, 1.2),
         "z_range"      : (Z_MIN, Z_MAX),
         "need_clf"     : True,
-        "eps"          : 0.037, "min_samples": 40 
-        # "eps"          : 0.05, "min_samples": 30 # debug
+        "eps"          : 0.037, "min_samples": 45
+        # "eps"          : 0.028, "min_samples": 40 # debug
     },
     "basket": {
         "ref_pcd"      : "reference/basket.pcd",
@@ -236,10 +248,14 @@ def run_icp_custom(curr_pcd, ref_pcd):
     curr_pcd.transform(reg.transformation)
     return curr_pcd, reg.transformation
 
-def run_icp_y_negative_only(curr_pcd, ref_pcd):
+def run_icp_y_negative_only(curr_pcd, ref_pcd, init_T=None):
     """
-    curr_pcd와 ref_pcd의 y<0 부분만 추출해 ICP 정합을 수행함
+    curr_pcd와 ref_pcd의 y<0 부분만 추출해 ICP 정합을 수행함.
+    init_T: 4x4 초기 변환 (드럼 중심 추정값으로 사전 정렬 시 수렴 안정화)
     """
+    if init_T is None:
+        init_T = np.eye(4)
+
     ref_pts = np.asarray(ref_pcd.points)
     curr_pts = np.asarray(curr_pcd.points)
 
@@ -254,9 +270,9 @@ def run_icp_y_negative_only(curr_pcd, ref_pcd):
     result = o3d.pipelines.registration.registration_icp(
         curr_half.voxel_down_sample(0.005),
         ref_half.voxel_down_sample(0.005),
-        0.05, np.eye(4),
+        0.05, init_T,
         o3d.pipelines.registration.TransformationEstimationPointToPoint(),
-        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=100)
+        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=200)
     )
     curr_pcd.transform(result.transformation)
     return curr_pcd, result.transformation
@@ -283,15 +299,36 @@ def camera_to_ee(p_cam: np.ndarray):
 
 
 def run(mode, json_output, show, device="cpu", rgb_ckpt="models/best.pt"):
+    global rs, o3d
+    global get_current_pointcloud, load_and_crop_pcd, align_icp, to_open3d_pcd
+    global split_clusters_by_color_lab
+    global detect_anomalies_adaptive, cluster_and_get_targets
+    global visualize_pointcloud_with_garments_open3d, split_colorful_clusters
+
+    if rs is None:
+        import pyrealsense2 as rs
+    if o3d is None:
+        import open3d as o3d
+    if get_current_pointcloud is None:
+        from detector.utils import (get_current_pointcloud, load_and_crop_pcd,
+                                    align_icp, to_open3d_pcd, split_clusters_by_color_lab)
+    if detect_anomalies_adaptive is None:
+        from detector.zscore_detector import (detect_anomalies_adaptive,
+                                              cluster_and_get_targets,
+                                              visualize_pointcloud_with_garments_open3d,
+                                              split_colorful_clusters)
+
     s_time = time.time()
     cfg = CFG.get(mode)
     if not cfg:
         print(f"Unknown mode: {mode}")
         return
 
-    # 1. model
-    ckpt_path = rgb_ckpt
-    rgb_gate  = _RGBGate(ckpt_path, device_str=device)
+    # 1. model (사전 로드된 모델 사용 시 torch.load 생략)
+    if _PRELOADED:
+        rgb_gate = _PRELOADED['rgb_gate']
+    else:
+        rgb_gate = _RGBGate(rgb_ckpt, device_str=device)
 
     rs_cfg   = rs.config()
     rs_cfg.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 15)
@@ -310,22 +347,16 @@ def run(mode, json_output, show, device="cpu", rgb_ckpt="models/best.pt"):
             pipeline = rs.pipeline()  # 매번 새 파이프라인 객체 생성
             profile = pipeline.start(rs_cfg)
             
-            # --- [참고용: 카메라 노출(AE) 고정 세팅 (임시 비활성화)] ---
-            # device = profile.get_device()
-            # color_sensor = None
-            # for sensor in device.query_sensors():
-            #     if sensor.is_color_sensor():
-            #         color_sensor = sensor
-            #         try:
-            #             # 초기에는 자동 노출을 켜서 주변 밝기에 적응하게 둠
-            #             sensor.set_option(rs.option.enable_auto_exposure, 1)
-            #             sensor.set_option(rs.option.enable_auto_white_balance, 1)
-            #         except: pass
-            #     elif sensor.is_depth_sensor():
-            #         try:
-            #             sensor.set_option(rs.option.enable_auto_exposure, 0)
-            #         except: pass
-            # ----------------------------------------------------
+            device = profile.get_device()
+            for sensor in device.query_sensors():
+                sname = sensor.get_info(rs.camera_info.name)
+                print(f"[INFO] Sensor found: {sname}")
+                if sensor.supports(rs.option.enable_auto_exposure):
+                    cur = sensor.get_option(rs.option.enable_auto_exposure)
+                    print(f"[INFO]   enable_auto_exposure: {cur} → setting to 1")
+                    sensor.set_option(rs.option.enable_auto_exposure, 1)
+                else:
+                    print(f"[INFO]   enable_auto_exposure: not supported")
             
             print(f"[INFO] RealSense Pipeline Started (Attempt {attempt+1})")
             break
@@ -382,8 +413,8 @@ def run(mode, json_output, show, device="cpu", rgb_ckpt="models/best.pt"):
             cv2.putText(color_img, label, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, label_col, 3)    # debug
             if show:
                 cv2.imshow("Laundry RGB Stream", color_img)
-            if cnt < 30:
-                cnt +=1 
+            if cnt < 60:
+                cnt +=1
                 # --- [참고용: 30프레임 대기 후 노출 고정 (임시 비활성화)] ---
                 # if cnt == 1:
                 #     print("[INFO] Warming up camera (Auto-Exposure ON for 30 frames)...")
@@ -432,25 +463,33 @@ def run(mode, json_output, show, device="cpu", rgb_ckpt="models/best.pt"):
                 if mode == "wm":
                     curr_pts, color_image, intr = get_current_pointcloud(pipeline, (Z_MIN, Z_MAX))
                     curr_pcd = to_open3d_pcd(curr_pts)
+                    if len(curr_pts) > 0:
+                        print(f"[DEBUG] 캡처 포인트 수: {len(curr_pts)}, z범위: {curr_pts[:,2].min():.3f} ~ {curr_pts[:,2].max():.3f}")
+                    else:
+                        print(f"[DEBUG] 캡처 포인트 없음 (Z_MIN={Z_MIN}, Z_MAX={Z_MAX})")
                 else:
                     curr_pts, color_image, intr = get_current_pointcloud(pipeline, (0.0, 1.0))
                     curr_pcd = to_open3d_pcd(curr_pts)
-                    
-                    
+
+
                 if mode == "wm":
                     center = estimate_center_from_pcd(curr_pcd)
-                    #cx, cy = center[0], center[1]
-                    #print(f"center x,y : {cx}, {cy}")
+                    cx, cy = center[0], center[1]
+                    print(f"[ICP init] 드럼 중심 추정 (카메라 프레임): cx={cx:.3f}, cy={cy:.3f}")
                     ref_pcd = create_z_axis_cylinder(
-                        #center_xy=(cx, cy),
                         radius=CYL_RADIUS,
                         z_min=Z_MIN,
                         z_max=Z_MAX,
                         color=[1, 0, 0]
                     )
                     ref_pts = np.asarray(ref_pcd.points)
-                    
-                    aligned_pcd, T_icp = run_icp_y_negative_only(curr_pcd, ref_pcd)
+
+                    # 드럼 중심을 ICP 초기 변환으로 사용:
+                    # ref는 (0,0) 중심이므로 curr를 (-cx,-cy)로 미리 이동시켜 대응점 탐색 범위 내에 오게 함
+                    init_T = np.eye(4)
+                    init_T[0, 3] = -cx
+                    init_T[1, 3] = -cy
+                    aligned_pcd, T_icp = run_icp_y_negative_only(curr_pcd, ref_pcd, init_T=init_T)
 
                     down = aligned_pcd.voxel_down_sample(0.01)
                     pts_down = np.asarray(down.points)
@@ -488,7 +527,7 @@ def run(mode, json_output, show, device="cpu", rgb_ckpt="models/best.pt"):
                         diffs = all_wing_pts - pt  # shape: (N, 3)
                         xy_dists = np.linalg.norm(diffs[:, :2], axis=1)  # XY 평면 거리
                         z_dists = np.abs(diffs[:, 2])                    # Z축 거리
-                        close_mask = (xy_dists < 0.02) & (z_dists < 0.15)
+                        close_mask = (xy_dists < 0.04) & (z_dists < 0.15)
                         return np.any(close_mask)
 
                     mask_keep = np.array([not is_close_to_wing(p) for p in pts_roi])
@@ -582,7 +621,7 @@ def run(mode, json_output, show, device="cpu", rgb_ckpt="models/best.pt"):
                         
                     elif mode == "wm":
                         ori_center = centers
-                        centers.sort(key=lambda c: np.linalg.norm([c[0], c[1]]))
+                        centers.sort(key=lambda c: abs(c[0]))  # x=0에 가까운 순서 (드럼 중심에 가까운 클러스터 우선)
                         
                         new_center = []
                         for c in centers:
@@ -626,9 +665,11 @@ def run(mode, json_output, show, device="cpu", rgb_ckpt="models/best.pt"):
                 
                 # debug
                 if show:
+                    selected = centers[0] if centers else None
                     visualize_pointcloud_with_garments_open3d(
                         ref_pts, pts_down, final_pts[mask],
-                        centers, filtered, same_clusters + diff_clusters)
+                        centers, filtered, same_clusters + diff_clusters,
+                        selected_center=selected)
                 
                 return
 

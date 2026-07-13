@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import DataLoader
-from act_learning.policy_full import ACTPolicyFull
+from act_learning.policy_full import ACTPolicyBaseline as ACTPolicyFull
 from act_learning.utils import PiperDataset
 import os
 import argparse
@@ -19,7 +19,7 @@ def train(args):
     dataset = PiperDataset(args.data_path, args.chunk_size)
     print(f"Dataset Size: {len(dataset)}")
     
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=8, pin_memory=True)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True)
     
     # Model Args (Heavier Config)
     policy_config = {
