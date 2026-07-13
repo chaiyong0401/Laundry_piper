@@ -114,6 +114,13 @@ class TinyUNet(nn.Module):
         return self.outc(x)
 
 # -------------------- Augment --------------------
+def random_channel_shuffle(img_rgb, p=0.3):
+    """RGB 채널 순서를 랜덤하게 섞어 색상 불변성 강화."""
+    if random.random() > p: return img_rgb
+    idx = list(range(3))
+    random.shuffle(idx)
+    return img_rgb[:, :, idx].copy()
+
 def color_jitter_rgb(img_rgb, b=(0.92,1.08), c=(0.92,1.08), s=(0.9,1.1), h=(-4,4), p=0.5):
     if random.random() > p: return img_rgb
     out = img_rgb.copy()
@@ -219,15 +226,28 @@ def discover_samples(root_base, domains):
     return sample_dirs
 
 class LaundrySet(Dataset):
-    def __init__(self, sample_dirs, zmax=0.5, train=True, size=None, use_rgb=True):
+    def __init__(self, sample_dirs, zmax=0.5, train=True, size=None, use_rgb=True, strong_color_aug=False):
         self.items = list(sample_dirs)
         self.zmax = zmax; self.train=train; self.size=size
         self.use_rgb = use_rgb
-        self.aug_cfg = {
-            'affine_p':0.4, 'noise_p':0.3, 'holes_p':0.2, 'bilateral_p':0.15,
-            'intjit_p':0.3, 'zbias_p':0.15, 'boundary_p':0.0,
-            'color_p':0.5, 'gamma_p':0.3, 'blur_p':0.2
-        }
+        self.strong_color_aug = strong_color_aug
+        if strong_color_aug:
+            # 미학습 색상 일반화: hue 전범위 회전, saturation/brightness 넓은 범위
+            self.aug_cfg = {
+                'affine_p':0.4, 'noise_p':0.3, 'holes_p':0.2, 'bilateral_p':0.15,
+                'intjit_p':0.3, 'zbias_p':0.15, 'boundary_p':0.0,
+                'color_p':0.95, 'gamma_p':0.5, 'blur_p':0.2,
+                'color_b':(0.6,1.4), 'color_c':(0.7,1.3), 'color_s':(0.3,1.7), 'color_h':(-90,90),
+                'channel_shuffle_p':0.3,
+            }
+        else:
+            self.aug_cfg = {
+                'affine_p':0.4, 'noise_p':0.3, 'holes_p':0.2, 'bilateral_p':0.15,
+                'intjit_p':0.3, 'zbias_p':0.15, 'boundary_p':0.0,
+                'color_p':0.5, 'gamma_p':0.3, 'blur_p':0.2,
+                'color_b':(0.92,1.08), 'color_c':(0.92,1.08), 'color_s':(0.9,1.1), 'color_h':(-4,4),
+                'channel_shuffle_p':0.0,
+            }
 
     def _load(self, d):
         D = np.load(os.path.join(d,'diff.npy')).astype(np.float32)
@@ -288,9 +308,13 @@ class LaundrySet(Dataset):
             m = mask_boundary_jitter(m, k=1, p=self.aug_cfg['boundary_p'])
 
         if rgb is not None:
-            rgb = color_jitter_rgb(rgb, b=(0.92,1.08), c=(0.92,1.08), s=(0.9,1.1), h=(-4,4), p=self.aug_cfg['color_p'])
+            rgb = color_jitter_rgb(rgb,
+                                   b=self.aug_cfg['color_b'], c=self.aug_cfg['color_c'],
+                                   s=self.aug_cfg['color_s'], h=self.aug_cfg['color_h'],
+                                   p=self.aug_cfg['color_p'])
             rgb = random_gamma(rgb, g=(0.92,1.08), p=self.aug_cfg['gamma_p'])
             rgb = random_gaussian_blur(rgb, k=(3,5), p=self.aug_cfg['blur_p'])
+            rgb = random_channel_shuffle(rgb, p=self.aug_cfg['channel_shuffle_p'])
 
         x = np.clip(x, 0.0, 1.0)
         return x, m, rgb
@@ -364,6 +388,8 @@ def main():
     ap.add_argument('--amp', action='store_true')
     ap.add_argument('--clip', type=float, default=1.0, help='grad clip max-norm (<=0 to disable)')
     ap.add_argument('--scheduler', choices=['cosine','plateau'], default='plateau')
+    ap.add_argument('--strong_color_aug', action='store_true',
+                    help='hue 전범위+채널셔플 강한 색상 aug (미학습 색상 일반화)')
 
     args = ap.parse_args()
     seed_everything(args.seed)
@@ -382,7 +408,7 @@ def main():
     val_samples = all_samples[:n_val]
     train_samples = all_samples[n_val:]
 
-    tr = LaundrySet(train_samples, zmax=args.zmax, train=True,  size=size, use_rgb=args.use_rgb)
+    tr = LaundrySet(train_samples, zmax=args.zmax, train=True,  size=size, use_rgb=args.use_rgb, strong_color_aug=args.strong_color_aug)
     va = LaundrySet(val_samples,   zmax=args.zmax, train=False, size=size, use_rgb=args.use_rgb)
 
     g = torch.Generator(); g.manual_seed(args.seed)

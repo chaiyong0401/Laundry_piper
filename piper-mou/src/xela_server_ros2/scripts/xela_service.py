@@ -474,7 +474,7 @@ def message_parser(msg_obj, msg_no: int = 0):
     times = clock.now()
     sensor.time = msg_obj.get("time", times)
     sensor.sensor_pos = int(msg_obj.get("sensor", "0"))
-    sensor.model = msg_obj.get("model", "unknown")
+    sensor.model = str(msg_obj.get("model", "unknown")).encode('ascii', 'ignore').decode('ascii')
     values = []
     forces = []
     taxels = msg_obj.get("taxels", -1)
@@ -677,7 +677,7 @@ def start_server():
                                            on_message=on_message,
                                            on_close=on_close,
                                            on_error=on_error)  # set up WebSockets
-            wsapp.run_forever()  # Run until connection dies
+            wsapp.run_forever(ping_interval=10, ping_timeout=5)  # keepalive: 10s ping, 5s timeout
         except KeyboardInterrupt:
             ME_ONLINE.set(False)
             wsapp.close()

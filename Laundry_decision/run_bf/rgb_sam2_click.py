@@ -206,7 +206,9 @@ class App:
         if self.args.ref_match in ('cached', 'best_ecc'):
             if stem in self.ref_cache:
                 idx = self.ref_cache[stem]
-                return self.empty_paths[idx]
+                if 0 <= idx < len(self.empty_paths):
+                    return self.empty_paths[idx]
+                # 캐시 인덱스가 범위 초과 → 재계산
             # 빠른 매칭(저해상도, MAE)
             sh, sw = self.empty_small[0].shape
             d_s = cv2.resize(d_cur, (sw, sh), interpolation=cv2.INTER_NEAREST).astype(np.float32)

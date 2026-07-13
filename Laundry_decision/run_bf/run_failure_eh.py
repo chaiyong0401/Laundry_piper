@@ -35,6 +35,29 @@ from torchvision import transforms as T
 from PIL import Image
 from loguru import logger
 
+# ── 사전 로드 캐시 ─────────────────────────────────
+_PRELOADED: dict = {}  # {net, rgb_gate, dev}
+_active_pipeline = None  # 현재 실행 중인 rs.pipeline (in-process 정리용)
+
+def preload(ckpt_path: str, rgb_ckpt: str | None = None, device: str = 'cpu') -> None:
+    """node2.py __init__에서 호출: 모델 가중치를 프로세스 메모리에 한번만 로드."""
+    dev = torch.device(device)
+    ckpt = torch.load(ckpt_path, map_location='cpu')
+    c_in = int(ckpt.get('c_in', 5))
+    base = int(ckpt.get('base', 32))
+    use_se = bool(ckpt.get('use_se', True))
+    net = TinyUNet(c_in=c_in, base=base, use_se=use_se).to(dev)
+    net.load_state_dict(ckpt['model'])
+    net.eval()
+    rgb_gate = None
+    if rgb_ckpt:
+        try:
+            rgb_gate = _RGBGate(rgb_ckpt, device_str=dev)
+        except Exception as e:
+            print(f"[preload][WARN] RGB gate 로드 실패: {e}")
+    _PRELOADED.update({'net': net, 'rgb_gate': rgb_gate, 'dev': dev})
+    print(f"[preload] run_failure_eh 완료 (device={device})")
+
 # ---------------- Model (TinyUNet) ----------------
 class SE(nn.Module):
     def __init__(self, ch, r=8):
@@ -627,6 +650,7 @@ def _save_color_depth_depthonly_blue_to_sky(
 
 # --------------- Main -------------------
 def main():
+    global _active_pipeline
     ap = argparse.ArgumentParser()
 
     ap.add_argument("--dbg_maps", action="store_true",
@@ -703,26 +727,26 @@ def main():
 
     args = ap.parse_args()
 
-    dev = torch.device(args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'))
-
-    # load net
-    ckpt = torch.load(args.ckpt, map_location='cpu')
-    meta = ckpt
-    c_in = int(meta.get('c_in', 5))   # RGB 포함 학습이면 5
-    base = int(meta.get('base', 32))
-    use_se = bool(meta.get('use_se', True))
-    net = TinyUNet(c_in=c_in, base=base, use_se=use_se).to(dev)
-    net.load_state_dict(meta['model'])
-    net.eval()
-
-    # --- [debug RGB_Gate] ---
-    rgb_gate = None
-    if args.rgb_ckpt:
-        try:
-            rgb_gate = _RGBGate(args.rgb_ckpt, device_str=dev)
-        except Exception as e:
-            print(f"[rgb-gate][WARN] 모델 로드 실패: {e}")
-    # ------
+    # 사전 로드된 모델 사용 (node2.py preload() 호출 시); 없으면 직접 로드
+    if _PRELOADED:
+        net      = _PRELOADED['net']
+        rgb_gate = _PRELOADED['rgb_gate']
+        dev      = _PRELOADED['dev']
+    else:
+        dev = torch.device(args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'))
+        ckpt = torch.load(args.ckpt, map_location='cpu')
+        c_in = int(ckpt.get('c_in', 5))
+        base = int(ckpt.get('base', 32))
+        use_se = bool(ckpt.get('use_se', True))
+        net = TinyUNet(c_in=c_in, base=base, use_se=use_se).to(dev)
+        net.load_state_dict(ckpt['model'])
+        net.eval()
+        rgb_gate = None
+        if hasattr(args, 'rgb_ckpt') and args.rgb_ckpt:
+            try:
+                rgb_gate = _RGBGate(args.rgb_ckpt, device_str=dev)
+            except Exception as e:
+                print(f"[rgb-gate][WARN] 모델 로드 실패: {e}")
 
 
     fx, fy, ppx, ppy = load_intrinsics(args.intr_json)
@@ -741,6 +765,7 @@ def main():
     config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 15)
     config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 15)
     profile = pipeline.start(config)
+    _active_pipeline = pipeline  # in-process 호출 중단 시 강제 정리용
     align = rs.align(rs.stream.color)
 
     # --------------------------------------------------
@@ -814,6 +839,7 @@ def main():
 
         
         pipeline.stop()
+        _active_pipeline = None
         if args.json:
             print(json.dumps({"success": True, "bg_path": args.bg_path}))
         else:
@@ -964,7 +990,8 @@ def main():
                 zmax=args.zmax,
                 blue_u8_max=35,
                 lift_to_u8=80,
-                u8_mask_thr=87,            
+                # u8_mask_thr=87,   # original (0.17m)
+                u8_mask_thr=102,  # 0.2m: (0.2/0.5)*255=102
                 close_ksize1=5,
                 blur_ksize=7,
                 thr_after_blur=127,
@@ -988,14 +1015,14 @@ def main():
                 cx, cy = int(center[0]), int(center[1])
                 section_idx, section_row, section_col = _compute_grid_index(cx, cy, W, H, nx, ny)
     
-            # JSON/저장에 함께 넣을 공통 페이로드
             _grid_payload = {
                 "grid": {"nx": nx, "ny": ny},
                 "section_idx": (int(section_idx) if section_idx is not None else None),
                 "section_row": (int(section_row) if section_row is not None else None),
                 "section_col": (int(section_col) if section_col is not None else None),
                 "occupied_cells": occupied_cells,
-                "center_uv": [int(center[0]), int(center[1])] if center is not None else None
+                "center_uv": [int(center[0]), int(center[1])] if center is not None else None,
+                "area": int(area)
             }
             # gating
             accepted = False
@@ -1140,6 +1167,7 @@ def main():
             break # debug rgb_gate
 
     pipeline.stop()
+    _active_pipeline = None
     cv2.destroyAllWindows()
 
 if __name__ == '__main__':

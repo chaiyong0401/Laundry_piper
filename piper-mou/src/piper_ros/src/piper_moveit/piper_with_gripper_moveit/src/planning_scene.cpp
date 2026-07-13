@@ -10,7 +10,8 @@
 using namespace std::chrono_literals;
 
 // double wm_y = 0.11;
-double wm_y = 0.01 ; // ORIGIN 0.075 -> 0.09 -> 0.11 -> 0.01 (-10cm closer to robot)
+double wm_y = -0.015 + 0.010 + 0.11; // ORIGIN 0.075 -> 0.09 -> 0.11 -> 0.01 -> -0.015 (front panel at y=0.24m), +1.0cm, +11cm
+double wm_x = -0.01 ;  // 세탁기 x축 오프셋 (-1cm)
 
 
 void addBox(moveit::planning_interface::PlanningSceneInterface& psi,
@@ -80,7 +81,7 @@ void addCircularDrum(moveit::planning_interface::PlanningSceneInterface& psi) //
   const int num_segments = 72;
   const double radius = 0.29;
   const double center_y = 0.28 + 0.3 + 0.05 +wm_y ;
-  const double center_z = 0.9;
+  const double center_z = 0.88;
   const double box_thickness = 0.005*2;
   const double box_depth = 0.0127*2;
   const double box_height = 0.28*2;
@@ -93,16 +94,16 @@ void addCircularDrum(moveit::planning_interface::PlanningSceneInterface& psi) //
 
     std::string id = "ow_drum_" + std::to_string(i);
     addBox(psi, id, {box_thickness, box_height, box_depth},
-           makeRotatedPose(x, center_y, center_z + z, 0, -angle, 0), 0.5, 0.5, 0.5, 0.3);
+           makeRotatedPose(x + wm_x, center_y, center_z + z, 0, -angle, 0), 0.5, 0.5, 0.5, 0.3);
   }
 }
 
 void addWasherDrum(moveit::planning_interface::PlanningSceneInterface& psi) //작은 원
 {
   const int num_segments = 36;
-  const double radius = 0.185;
+  const double radius = 0.205;
   const double center_y = 0.3+wm_y;  // wm_y 포함된 y
-  const double center_z = 0.9;
+  const double center_z = 0.88;
   const double box_thickness = 0.017*2;  // x축 방향 길이
   const double box_height = 0.1;     // y축 방향 길이 (드럼 높이)
   const double box_depth = 0.017*2;      // z축 방향 길이
@@ -115,7 +116,7 @@ void addWasherDrum(moveit::planning_interface::PlanningSceneInterface& psi) //�
     std::string id = "wm_drum_seg_" + std::to_string(i);
     addBox(psi, id,
            {box_thickness, box_height, box_depth},
-           makeRotatedPose(x, center_y, center_z + z, 0, -angle, 0), 0.5, 0.5, 0.5, 0.3);
+           makeRotatedPose(x + wm_x, center_y, center_z + z, 0, -angle, 0), 0.5, 0.5, 0.5, 0.3);
   }
 }
 
@@ -125,6 +126,7 @@ int main(int argc, char** argv)
 {
   rclcpp::init(argc, argv);
   auto node = rclcpp::Node::make_shared("add_scene_objects_node");
+  bool add_basket = node->declare_parameter<bool>("add_basket", true);
   moveit::planning_interface::PlanningSceneInterface psi;
 
   rclcpp::sleep_for(2s);
@@ -133,11 +135,11 @@ int main(int argc, char** argv)
   addWasherDrum(psi);
 
   // 책상 상판 (Z center=0.425, Thickness=0.04 => Top=0.445)
-  addBox(psi, "desk_top", {0.56, 0.31, 0.04}, makePose(-0.2, 0.0, 0.425));
+  addBox(psi, "desk_top", {0.56, 0.25, 0.04}, makePose(-0.2, 0.0, 0.425));
   // 책상 왼쪽 다리
-  addBox(psi, "desk_leg_left", {0.03, 0.28, 0.33}, makePose(-0.46, 0.0, 0.265));
+  addBox(psi, "desk_leg_left", {0.03, 0.22, 0.33}, makePose(-0.46, 0.0, 0.265));
   // 책상 오른쪽 다리
-  addBox(psi, "desk_leg_right", {0.03, 0.28, 0.33}, makePose(0.06, 0.0, 0.265));
+  addBox(psi, "desk_leg_right", {0.03, 0.22, 0.33}, makePose(0.06, 0.0, 0.265));
 
   // original
   // // 책상 상판
@@ -147,25 +149,26 @@ int main(int argc, char** argv)
   // // 책상 오른쪽 다리
   // addBox(psi, "desk_leg_right", {0.03, 0.28, 0.33}, makePose(0.26, 0.0, 0.165));
 
-  double basket_y = - (0.36+0.02);
+  if (add_basket) {
+    double basket_y = - (0.36+0.02); // front wall outer face at 24cm from robot
+    double basket_x = -0.06 + 0.010; // +1.0cm in x
 
-  // addBox(psi, "s", {0.255, 0.255, 0.255}, makePose(0, 0.255/2, 0));
+    // 바구니 - 바닥 (가로 X=40cm, 세로 Y=28cm, 두께 1cm, Z=0.115 => Top=0.12)
+    addBox(psi, "basket_bottom", {0.40, 0.28, 0.01}, makePose(basket_x, 0.0+basket_y, 0.115), 0.1, 0.1, 0.8, 0.3);
 
-  // 바구니 - 바닥 (가로 X=40cm, 세로 Y=28cm, 두께 1cm, Z=0.115 => Top=0.12)
-  addBox(psi, "basket_bottom", {0.40, 0.28, 0.01}, makePose(-0.06, 0.0+basket_y, 0.115), 0.1, 0.1, 0.8, 0.3);
-  
-  // 벽 두께 1.75cm (0.0175m)
-  double wall_thickness = 0.0175;
-  double wall_y_offset = (0.28 - wall_thickness) / 2.0; // 외측너비(28) 기준 벽 중심 위치
-  double wall_x_offset = (0.40 - wall_thickness) / 2.0; // 외측가로(40) 기준 벽 중심 위치
+    // 벽 두께 1.75cm (0.0175m)
+    double wall_thickness = 0.0175;
+    double wall_y_offset = (0.28 - wall_thickness) / 2.0;
+    double wall_x_offset = (0.40 - wall_thickness) / 2.0;
 
-  // 바구니 - 앞/뒤 벽 (가로 방향 벽, 투명도 0.3)
-  addBox(psi, "basket_wall_front", {0.40, wall_thickness, 0.25}, makePose(-0.06, wall_y_offset+basket_y, 0.2), 0.1, 0.1, 0.8, 0.3);
-  addBox(psi, "basket_wall_back", {0.40, wall_thickness, 0.25}, makePose(-0.06, -wall_y_offset+basket_y, 0.2), 0.1, 0.1, 0.8, 0.3);
-  
-  // 바구니 - 좌/우 벽 (세로 방향 벽, 투명도 0.3)
-  addBox(psi, "basket_wall_left", {wall_thickness, 0.28, 0.25}, makePose(-0.06+wall_x_offset, 0.0+basket_y, 0.2), 0.1, 0.1, 0.8, 0.3);
-  addBox(psi, "basket_wall_right", {wall_thickness, 0.28, 0.25}, makePose(-0.06-wall_x_offset, 0.0+basket_y, 0.2), 0.1, 0.1, 0.8, 0.3);
+    // 바구니 - 앞/뒤 벽
+    addBox(psi, "basket_wall_front", {0.40, wall_thickness, 0.25}, makePose(basket_x, wall_y_offset+basket_y, 0.2), 0.1, 0.1, 0.8, 0.3);
+    addBox(psi, "basket_wall_back", {0.40, wall_thickness, 0.25}, makePose(basket_x, -wall_y_offset+basket_y, 0.2), 0.1, 0.1, 0.8, 0.3);
+
+    // 바구니 - 좌/우 벽
+    addBox(psi, "basket_wall_left", {wall_thickness, 0.28, 0.25}, makePose(basket_x+wall_x_offset, 0.0+basket_y, 0.2), 0.1, 0.1, 0.8, 0.3);
+    addBox(psi, "basket_wall_right", {wall_thickness, 0.28, 0.25}, makePose(basket_x-wall_x_offset, 0.0+basket_y, 0.2), 0.1, 0.1, 0.8, 0.3);
+  }
 
   // origianl
   // // 바구니 - 바닥
@@ -178,22 +181,22 @@ int main(int argc, char** argv)
   // addBox(psi, "basket_wall_right", {0.004, 0.22, 0.26}, makePose(-0.21, 0.0+basket_y, 0.1));
 
   // // 세탁기 - 앞판 위쪽
-  addBox(psi, "front_top", {0.6860, 0.01, 0.400}, makeRotatedPose(0, 0.255+wm_y, 1.27000, 0.00000, 0.00000, 0.00000), 0.5, 0.5, 0.5, 0.3);
-  addBox(psi, "front_bottom", {0.6860, 0.010, 0.37}, makeRotatedPose(0, 0.255+wm_y, 0.545, 0.00000, 0.00000, 0.00000), 0.5, 0.5, 0.5, 0.3);
-  addBox(psi, "front_left", {0.1580, 0.010, 0.370}, makeRotatedPose(0.08600-0.35, 0.255+wm_y, 0.885, 0.00000, 0.00000, 0.00000), 0.5, 0.5, 0.5, 0.3);
-  addBox(psi, "front_right", {0.1580, 0.010, 0.370}, makeRotatedPose(0.61400-0.35, 0.255+wm_y, 0.885, 0.00000, 0.00000, 0.00000), 0.5, 0.5, 0.5, 0.3);
-  addBox(psi, "corner_filler_tr", {0.150, 0.010, 0.150}, makeRotatedPose(0.53500-0.35, 0.255+wm_y, 1.06000, 0.00000, -0.78540, 0.00000), 0.5, 0.5, 0.5, 0.3);
-  addBox(psi, "corner_filler_tl", {0.150, 0.010, 0.150}, makeRotatedPose(0.16500-0.35, 0.255+wm_y, 1.06000, 0.00000, -0.78540, 0.00000), 0.5, 0.5, 0.5, 0.3);
-  addBox(psi, "corner_filler_br", {0.150, 0.010, 0.150}, makeRotatedPose(0.53500-0.35, 0.255+wm_y, 0.7400, 0.00000, -0.78540, 0.00000), 0.5, 0.5, 0.5, 0.3);
-  addBox(psi, "corner_filler_bl", {0.150, 0.010, 0.150}, makeRotatedPose(0.16500-0.35, 0.255+wm_y, 0.7400, 0.00000, -0.78540, 0.00000), 0.5, 0.5, 0.5, 0.3);
+  addBox(psi, "front_top", {0.6860, 0.01, 0.400}, makeRotatedPose(0+wm_x, 0.255+wm_y, 1.25000, 0.00000, 0.00000, 0.00000), 0.5, 0.5, 0.5, 0.3);
+  addBox(psi, "front_bottom", {0.6860, 0.010, 0.35}, makeRotatedPose(0+wm_x, 0.255+wm_y, 0.535, 0.00000, 0.00000, 0.00000), 0.5, 0.5, 0.5, 0.3);
+  addBox(psi, "front_left", {0.1580, 0.010, 0.370}, makeRotatedPose(0.08600-0.35+wm_x, 0.255+wm_y, 0.885, 0.00000, 0.00000, 0.00000), 0.5, 0.5, 0.5, 0.3);
+  addBox(psi, "front_right", {0.1580, 0.010, 0.370}, makeRotatedPose(0.61400-0.35+wm_x, 0.255+wm_y, 0.885, 0.00000, 0.00000, 0.00000), 0.5, 0.5, 0.5, 0.3);
+  addBox(psi, "corner_filler_tr", {0.150, 0.010, 0.150}, makeRotatedPose(0.53500-0.35+wm_x, 0.255+wm_y, 1.06000, 0.00000, -0.78540, 0.00000), 0.5, 0.5, 0.5, 0.3);
+  addBox(psi, "corner_filler_tl", {0.150, 0.010, 0.150}, makeRotatedPose(0.16500-0.35+wm_x, 0.255+wm_y, 1.06000, 0.00000, -0.78540, 0.00000), 0.5, 0.5, 0.5, 0.3);
+  addBox(psi, "corner_filler_br", {0.150, 0.010, 0.150}, makeRotatedPose(0.53500-0.35+0.01+wm_x, 0.255+wm_y, 0.7200, 0.00000, -0.78540, 0.00000), 0.5, 0.5, 0.5, 0.3);
+  addBox(psi, "corner_filler_bl", {0.150, 0.010, 0.150}, makeRotatedPose(0.16500-0.35-0.01+wm_x, 0.255+wm_y, 0.7200, 0.00000, -0.78540, 0.00000), 0.5, 0.5, 0.5, 0.3);
 
-  addBox(psi, "stand_base", {0.686, 0.875, 0.36}, makePose(0, 0.6875+wm_y, 0.18), 0.5, 0.5, 0.5, 0.3);  // 하단 받침대
+  addBox(psi, "stand_base", {0.686, 0.875, 0.36}, makePose(0+wm_x, 0.6875+wm_y, 0.18), 0.5, 0.5, 0.5, 0.3);  // 하단 받침대
   // 상단 몸통
   // addBox(psi, "main_body_back", {0.686, 0.02, 1.11}, makePose(0, 1.125, 0.915));
-  addBox(psi, "main_body_left", {0.02, 0.875, 1.11}, makePose(-0.333, 0.6875+wm_y, 0.915), 0.5, 0.5, 0.5, 0.3);   
-  addBox(psi, "main_body_right", {0.02, 0.875, 1.11}, makePose(0.333, 0.6875+wm_y, 0.915), 0.5, 0.5, 0.5, 0.3);  
-  addBox(psi, "main_body_top", {0.686, 0.875, 0.02}, makePose(0, 0.6875+wm_y, 1.465), 0.5, 0.5, 0.5, 0.3);
-  addBox(psi, "main_body_bottom", {0.686, 0.875, 0.02}, makePose(0, 0.6875+wm_y, 0.37), 0.5, 0.5, 0.5, 0.3);
+  addBox(psi, "main_body_left", {0.02, 0.875, 1.11}, makePose(-0.333+wm_x, 0.6875+wm_y, 0.915), 0.5, 0.5, 0.5, 0.3);
+  addBox(psi, "main_body_right", {0.02, 0.875, 1.11}, makePose(0.333+wm_x, 0.6875+wm_y, 0.915), 0.5, 0.5, 0.5, 0.3);
+  addBox(psi, "main_body_top", {0.686, 0.875, 0.02}, makePose(0+wm_x, 0.6875+wm_y, 1.465), 0.5, 0.5, 0.5, 0.3);
+  addBox(psi, "main_body_bottom", {0.686, 0.875, 0.02}, makePose(0+wm_x, 0.6875+wm_y, 0.37), 0.5, 0.5, 0.5, 0.3);
 
   // for test
   // addBox(psi, "boxboxbox", {0.1, 0.1, 0.6}, makePose(0.3, 0, 0.6));  

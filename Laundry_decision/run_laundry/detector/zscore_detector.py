@@ -75,11 +75,28 @@ def cluster_and_get_targets(points, mask, eps=0.037, min_samples=40):
         
         clusters.append(cluster)
         centers.append(np.mean(cluster, axis=0))
-        
+
+    # 날개 파편 제거: 필터된 cluster(날개 판정)와 가까운 cluster도 제거
+    # 하나의 날개가 2개 cluster로 분리될 때 PCA 필터를 통과한 파편을 잡기 위함
+    # WING_PROXIMITY_THRESH = 0.08  # 8cm 이내면 같은 날개로 간주
+    # if filtered:
+    #     filtered_centers = np.array([np.mean(fc, axis=0) for fc in filtered])
+    #     keep_clusters, keep_centers = [], []
+    #     for c, center in zip(clusters, centers):
+    #         dists = np.linalg.norm(filtered_centers - center, axis=1)
+    #         if np.min(dists) < WING_PROXIMITY_THRESH:
+    #             print(f" - [Wing Proximity Filter] center={np.round(center, 3)}, "
+    #                   f"min_dist={np.min(dists):.3f} < {WING_PROXIMITY_THRESH} → 날개 파편 제거")
+    #             filtered.append(c)
+    #         else:
+    #             keep_clusters.append(c)
+    #             keep_centers.append(center)
+    #     clusters, centers = keep_clusters, keep_centers
+
     return centers, clusters, filtered
 
 
-def visualize_pointcloud_with_garments_open3d(ref_pts, curr_pts, garment_pts, centers=None, filtered_clusters=None, clusters=None):
+def visualize_pointcloud_with_garments_open3d(ref_pts, curr_pts, garment_pts, centers=None, filtered_clusters=None, clusters=None, selected_center=None):
     def make_pcd(points, color):
         if not isinstance(points, np.ndarray):
             points = np.array(points)
@@ -113,7 +130,7 @@ def visualize_pointcloud_with_garments_open3d(ref_pts, curr_pts, garment_pts, ce
     if len(unique_garments) > 0:
         vis_objs.append(make_pcd(unique_garments, [0.5, 0.5, 0.5]))  # 빨간색
 
-    # 4. 필터링된 날개 
+    # 4. 필터링된 날개
     if filtered_clusters:
         #len(filtered_clusters)
         for fc in filtered_clusters:
@@ -138,12 +155,15 @@ def visualize_pointcloud_with_garments_open3d(ref_pts, curr_pts, garment_pts, ce
             color = cluster_colors[i % len(cluster_colors)]
             vis_objs.append(make_pcd(cluster, color))
 
-    # 6. 중심점
+    # 6. 중심점 (선택된 파지점은 빨간색, 나머지는 검은색)
     if centers:
         for center in centers:
             sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.01)
             sphere.translate(center)
-            sphere.paint_uniform_color([0, 0, 0])  # 검은색
+            if selected_center is not None and np.allclose(center, selected_center, atol=1e-6):
+                sphere.paint_uniform_color([1, 0, 0])  # 빨간색 (선택된 파지점)
+            else:
+                sphere.paint_uniform_color([0, 0, 0])  # 검은색
             vis_objs.append(sphere)
     # 축 추가 
     axes = o3d.geometry.TriangleMesh.create_coordinate_frame(

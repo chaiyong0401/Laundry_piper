@@ -30,11 +30,32 @@ import numpy as np
 import cv2
 import torch, torch.nn as nn
 
-
 import torch.nn.functional as F
 from torchvision import transforms as T
 from PIL import Image
 from loguru import logger
+
+# ── 사전 로드 캐시 ─────────────────────────────────
+_PRELOADED: dict = {}  # {net, rgb_gate, dev}
+
+def preload(ckpt_path: str, rgb_ckpt: str | None = None, device: str = 'cpu') -> None:
+    """node2.py __init__에서 호출: 모델 가중치를 프로세스 메모리에 한번만 로드."""
+    dev = torch.device(device)
+    ckpt = torch.load(ckpt_path, map_location='cpu')
+    c_in = int(ckpt.get('c_in', 5))
+    base = int(ckpt.get('base', 32))
+    use_se = bool(ckpt.get('use_se', True))
+    net = TinyUNet(c_in=c_in, base=base, use_se=use_se).to(dev)
+    net.load_state_dict(ckpt['model'])
+    net.eval()
+    rgb_gate = None
+    if rgb_ckpt:
+        try:
+            rgb_gate = _RGBGate(rgb_ckpt, device_str=dev)
+        except Exception as e:
+            print(f"[preload][WARN] RGB gate 로드 실패: {e}")
+    _PRELOADED.update({'net': net, 'rgb_gate': rgb_gate, 'dev': dev})
+    print(f"[preload] run_failure_new 완료 (device={device})")
 
 # ---------------- Model (TinyUNet) ----------------
 class SE(nn.Module):
@@ -704,26 +725,26 @@ def main():
 
     args = ap.parse_args()
 
-    dev = torch.device(args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'))
-
-    # load net
-    ckpt = torch.load(args.ckpt, map_location='cpu')
-    meta = ckpt
-    c_in = int(meta.get('c_in', 5))   # RGB 포함 학습이면 5
-    base = int(meta.get('base', 32))
-    use_se = bool(meta.get('use_se', True))
-    net = TinyUNet(c_in=c_in, base=base, use_se=use_se).to(dev)
-    net.load_state_dict(meta['model'])
-    net.eval()
-
-    # --- [debug RGB_Gate] ---
-    rgb_gate = None
-    if args.rgb_ckpt:
-        try:
-            rgb_gate = _RGBGate(args.rgb_ckpt, device_str=dev)
-        except Exception as e:
-            print(f"[rgb-gate][WARN] 모델 로드 실패: {e}")
-    # ------
+    # 사전 로드된 모델 사용 (node2.py preload() 호출 시); 없으면 직접 로드
+    if _PRELOADED:
+        net      = _PRELOADED['net']
+        rgb_gate = _PRELOADED['rgb_gate']
+        dev      = _PRELOADED['dev']
+    else:
+        dev = torch.device(args.device if args.device else ('cuda' if torch.cuda.is_available() else 'cpu'))
+        ckpt = torch.load(args.ckpt, map_location='cpu')
+        c_in = int(ckpt.get('c_in', 5))
+        base = int(ckpt.get('base', 32))
+        use_se = bool(ckpt.get('use_se', True))
+        net = TinyUNet(c_in=c_in, base=base, use_se=use_se).to(dev)
+        net.load_state_dict(ckpt['model'])
+        net.eval()
+        rgb_gate = None
+        if hasattr(args, 'rgb_ckpt') and args.rgb_ckpt:
+            try:
+                rgb_gate = _RGBGate(args.rgb_ckpt, device_str=dev)
+            except Exception as e:
+                print(f"[rgb-gate][WARN] 모델 로드 실패: {e}")
 
 
     fx, fy, ppx, ppy = load_intrinsics(args.intr_json)
@@ -942,10 +963,14 @@ def main():
             if bg_rgb is not None:
                 # 1. Compute absolute diff (Strict Pixel Difference)
                 diff = cv2.absdiff(color_bgr, bg_rgb)
-                diff_gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
-                
-                # 2. Strict Thresholding (기존 40 -> 80으로 두 배 빡세게 설정)
-                _, mask_u8 = cv2.threshold(diff_gray, 100, 255, cv2.THRESH_BINARY)
+                # [FIX] grayscale 변환(0.114B+0.587G+0.299R) 대신 채널별 최대값 사용
+                # 이유: 파란 옷감처럼 특정 채널만 크게 다를 때 grayscale 가중치로 묻혀버림
+                # 예) B채널 diff=200 → grayscale=22.8 → threshold 100 미달
+                diff_max = np.max(diff, axis=2).astype(np.uint8)
+                diff_gray = diff_max  # save/debug용 유지
+
+                # 2. Thresholding (채널 최대값 기준, 더 민감하게 검출)
+                _, mask_u8 = cv2.threshold(diff_max, 60, 255, cv2.THRESH_BINARY)
                 
                 # 3. Aggressive Morphology cleanup 
                 # (그림자나 유광 반사로 우연히 발생한 큰 노이즈를 완전히 뭉개서 지워버림)
@@ -990,7 +1015,7 @@ def main():
                 xyz = None
                 if center is not None and area >= args.vote_min_area:
                     cx, cy = center
-                    z_m = 0.08 # Hardcoded bypass for Depth=0 (Changed to 9cm as requested)
+                    z_m = 0.16 # Hardcoded bypass for Depth=0 (Changed to 9cm as requested)
                     X,Y,Z = uvz_to_xyz(cx, cy, z_m, fx, fy, ppx, ppy)
                     xyz = (X, Y, Z)
                     last_valid_t = now
@@ -1103,14 +1128,14 @@ def main():
                 cx, cy = int(center[0]), int(center[1])
                 section_idx, section_row, section_col = _compute_grid_index(cx, cy, W, H, nx, ny)
     
-            # JSON/저장에 함께 넣을 공통 페이로드
             _grid_payload = {
                 "grid": {"nx": nx, "ny": ny},
                 "section_idx": (int(section_idx) if section_idx is not None else None),
                 "section_row": (int(section_row) if section_row is not None else None),
                 "section_col": (int(section_col) if section_col is not None else None),
                 "occupied_cells": occupied_cells,
-                "center_uv": [int(center[0]), int(center[1])] if center is not None else None
+                "center_uv": [int(center[0]), int(center[1])] if center is not None else None,
+                "area": int(area)
             }
             # gating
             accepted = False
@@ -1151,13 +1176,13 @@ def main():
                 arr = np.array(votes, dtype=np.float32)
                 med = np.median(arr, axis=0).tolist()
                 med[2] += 0.01 # 1cm offset
-                success_out = {"success": True, "centers": [med], **_grid_payload}
+                success_out = {"success": True, "centers": [med], "area": int(area), **_grid_payload}
         else:
             # 단발성: 현재 프레임 유효하면 즉시 성공
             if accepted and xyz is not None:
                 l_xyz = list(xyz)
                 l_xyz[2] += 0.01 # 1cm offset
-                success_out = {"success": True, "centers": [l_xyz], **_grid_payload}
+                success_out = {"success": True, "centers": [l_xyz], "area": int(area), **_grid_payload}
 
         # UI
         if args.show:
@@ -1192,6 +1217,11 @@ def main():
                     y0 = (section_idx // nx) * cell_h
                     cv2.rectangle(view, (x0, y0), (x0 + cell_w - 1, y0 + cell_h - 1), (0, 255, 255), 2)
             cv2.imshow("failure_detect", view)
+            # failure_rgb_diff 모드: 마스크/diff 원본 별도 창
+            if args.mode == "failure_rgb_diff" and 'mask' in dir() and mask is not None:
+                cv2.imshow("rgb_diff_mask", mask)
+                if 'diff_max' in dir():
+                    cv2.imshow("rgb_diff_raw", diff_max)
             # debug rgb_gate
             if img_crop_for_vis is not None:
                 cv2.imshow("RGB gate input (Crop)", img_crop_for_vis)
