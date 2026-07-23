@@ -8,8 +8,8 @@
     "n_pos": 18,
     "n_neg": 18,
     "threshold": 0.4979856872084568,
-    "latency_ms": 53.18370262160897,
-    "latency_std": 25.499504597339488
+    "latency_ms": 56.79156709462404,
+    "latency_std": 27.484973814946233
   },
   "Channel B only (MRL delta)": {
     "precision": 0.8333333333333334,
@@ -20,8 +20,8 @@
     "n_pos": 18,
     "n_neg": 18,
     "threshold": 0.09099011699358608,
-    "latency_ms": 1.122490568086505,
-    "latency_std": 0.3796647294461844
+    "latency_ms": 1.1018920876085758,
+    "latency_std": 0.37462043572504133
   },
   "Channel A OR Channel B": {
     "precision": 0.8823529411764706,
@@ -32,7 +32,7 @@
     "n_pos": 18,
     "n_neg": 18,
     "threshold": 1.0,
-    "latency_ms": 54.3840669374913,
-    "latency_std": 25.935463782253784
+    "latency_ms": 54.62629061192274,
+    "latency_std": 26.032520388701315
   }
 }

@@ -210,6 +210,253 @@ def apply_relative_transform_tensor(x: torch.Tensor, mode: str,
 
 
 # ─────────────────────────────────────────────
+#  9D feature 계산 (from 48D raw)
+# ─────────────────────────────────────────────
+def compute_9d_from_raw(raw: np.ndarray) -> np.ndarray:
+    """
+    48D raw (T, 48) → 9D feature (T, 9)
+    features: [mrl, net_norm, max_norm, unit_x, unit_y, unit_z,
+               entropy, std_norm, sum_norm]
+    """
+    T = raw.shape[0]
+    vecs = raw.reshape(T, 16, 3).astype(np.float64)
+    norms = np.linalg.norm(vecs, axis=2)            # (T, 16)
+
+    max_norm = norms.max(axis=1)                    # (T,)
+    sum_norm = norms.sum(axis=1)                    # (T,)
+    std_norm = norms.std(axis=1)                    # (T,)
+
+    # Shannon entropy of per-taxel norm distribution
+    p = norms / (sum_norm[:, None] + 1e-8) + 1e-10
+    entropy = -(p * np.log(p)).sum(axis=1)          # (T,)
+
+    # Weighted mean vector (net_norm)
+    w = norms.copy(); w[w == 0] = 1e-6
+    mean_vec = vecs.sum(axis=1) / w.sum(axis=1, keepdims=True)  # (T, 3)
+    net_norm = np.linalg.norm(mean_vec, axis=1)     # (T,)
+
+    # MRL + mean unit direction
+    valid = norms > 0.1                             # (T, 16)
+    n_valid = valid.sum(axis=1)                     # (T,)
+    mean_unit = np.zeros((T, 3))
+    for t in range(T):
+        if n_valid[t] >= 2:
+            uv = vecs[t, valid[t]] / norms[t, valid[t], None]
+            mean_unit[t] = uv.mean(axis=0)
+    mrl = np.linalg.norm(mean_unit, axis=1)         # (T,)
+
+    return np.column_stack([
+        mrl, net_norm, max_norm,
+        mean_unit[:, 0], mean_unit[:, 1], mean_unit[:, 2],
+        entropy, std_norm, sum_norm,
+    ]).astype(np.float32)
+
+
+# ─────────────────────────────────────────────
+#  C8D feature 계산 (from 48D raw, Option B: 누적 변위를 force proxy로 사용)
+# ─────────────────────────────────────────────
+# XELA uSPa44 4×4 택셀 위치 (top-left → right → next row, 단위 간격)
+_TAXEL_POS = np.array(
+    [[(col - 1.5), (1.5 - row), 0.0] for row in range(4) for col in range(4)],
+    dtype=np.float64,
+)  # shape (16, 3)
+
+def compute_8d_from_raw(raw: np.ndarray, acontact_thresh: float = 0.1) -> np.ndarray:
+    """
+    48D raw cumulative displacement (T, 48) → C8D (T, 8)
+    C8D = [Fx, Fy, Fz, Mx, My, Mz, Acontact, Fmax]
+    fi = cumulative displacement vector of taxel i (Option B proxy for force).
+    Taxel order: top-left → row-major, 48D = [x0,y0,z0, x1,y1,z1, ...]
+    """
+    T = raw.shape[0]
+    vecs = raw.reshape(T, 16, 3).astype(np.float64)   # (T, 16, 3)
+
+    # F = Σ fi
+    F = vecs.sum(axis=1)                               # (T, 3)
+
+    # M = Σ (ci × fi)
+    cross = np.cross(_TAXEL_POS[None, :, :], vecs)    # (T, 16, 3)
+    M = cross.sum(axis=1)                              # (T, 3)
+
+    # Acontact = Σ sigmoid(fz_i - τ),  α=10
+    Acontact = (1.0 / (1.0 + np.exp(-10.0 * (vecs[:, :, 2] - acontact_thresh)))).sum(axis=1)
+
+    # Fmax = max taxel norm
+    Fmax = np.linalg.norm(vecs, axis=2).max(axis=1)   # (T,)
+
+    return np.column_stack([F, M, Acontact, Fmax]).astype(np.float32)
+
+
+def compute_10d_from_raw(raw: np.ndarray, acontact_thresh: float = 0.1) -> np.ndarray:
+    """
+    48D raw cumulative displacement (T, 48) → 10D (T, 10)
+    10D = [mrl, norm, Fx, Fy, Fz, Mx, My, Mz, Acontact, Fmax]
+
+    6D 고유 정보:
+      - mrl  : 단위벡터 정렬 응집도 (Σ unit_i 의 크기)
+      - norm : 평균 taxel 세기 (Σ‖fi‖/16), C8D의 ‖F‖/16 ≠ 이므로 유지
+    C8D 전체 유지:
+      - Fx,Fy,Fz : 합력 벡터
+      - Mx,My,Mz : 공간 모멘트 (위치 정보 포함)
+      - Acontact : soft 접촉 taxel 수 (sigmoid threshold=acontact_thresh)
+      - Fmax     : 16 taxel 중 z방향 최대값 (법선력 기준 가장 강한 접촉)
+    """
+    T = raw.shape[0]
+    vecs = raw.reshape(T, 16, 3).astype(np.float64)   # (T, 16, 3)
+    norms = np.linalg.norm(vecs, axis=2)               # (T, 16)
+
+    # mrl: 활성 taxel 단위벡터의 평균 크기
+    valid = norms > 0.1
+    n_valid = valid.sum(axis=1)
+    mean_unit = np.zeros((T, 3))
+    for t in range(T):
+        if n_valid[t] >= 2:
+            uv = vecs[t, valid[t]] / norms[t, valid[t], None]
+            mean_unit[t] = uv.mean(axis=0)
+    mrl = np.linalg.norm(mean_unit, axis=1)            # (T,)
+
+    # norm: 평균 taxel 세기
+    norm = norms.mean(axis=1)                          # (T,)
+
+    # C8D 성분
+    F = vecs.sum(axis=1)                               # (T, 3)
+    cross = np.cross(_TAXEL_POS[None, :, :], vecs)    # (T, 16, 3)
+    M = cross.sum(axis=1)                              # (T, 3)
+    Acontact = (1.0 / (1.0 + np.exp(-10.0 * (vecs[:, :, 2] - acontact_thresh)))).sum(axis=1)
+    Fmax = vecs[:, :, 2].max(axis=1)                  # (T,) z방향 최대 taxel 값
+
+    return np.column_stack([
+        mrl, norm, F, M, Acontact, Fmax
+    ]).astype(np.float32)
+
+
+def compute_11d_from_raw(raw: np.ndarray, acontact_thresh: float = 0.1) -> np.ndarray:
+    """
+    48D raw cumulative displacement (T, 48) → 11D (T, 11)
+    11D = [mrl, norm, Fx, Fy, Fz, Mx, My, Mz, Acontact, Fmax, Fnorm]
+      - Fnorm : |F| = sqrt(Fx²+Fy²+Fz²), 합력 크기
+    """
+    seq10 = compute_10d_from_raw(raw, acontact_thresh)
+    Fnorm = np.linalg.norm(seq10[:, 2:5], axis=1).astype(np.float32)
+    return np.column_stack([seq10, Fnorm]).astype(np.float32)
+
+
+def load_sequences_windowed_11d(data_dir: str, prefix: str, label: str,
+                                seq_len: int, stride: int,
+                                exclude_files: set = None,
+                                acontact_thresh: float = 0.1) -> list[np.ndarray]:
+    """_raw.npy에서 11D feature를 계산하여 슬라이딩 윈도우로 로드."""
+    pattern = os.path.join(data_dir, f"{prefix}_*_{label}_raw.npy")
+    files = sorted(glob.glob(pattern))
+    windows = []
+    for f in files:
+        if exclude_files and os.path.basename(f) in exclude_files:
+            print(f"[SKIP-NOISY] {os.path.basename(f)}")
+            continue
+        arr_raw = np.load(f)
+        if arr_raw.ndim != 2 or arr_raw.shape[0] < seq_len:
+            print(f"[SKIP] {os.path.basename(f)}: shape={arr_raw.shape}")
+            continue
+        arr = compute_11d_from_raw(arr_raw, acontact_thresh)
+        n_win = 0
+        for start in range(0, arr.shape[0] - seq_len + 1, stride):
+            windows.append(arr[start:start + seq_len])
+            n_win += 1
+        print(f"[LOAD-11D] {os.path.basename(f)}: {arr_raw.shape}→11D {n_win} windows")
+    return windows
+
+
+def load_sequences_raw_11d(data_dir: str, prefix: str, label: str,
+                            acontact_thresh: float = 0.1) -> list[np.ndarray]:
+    """_raw.npy에서 11D feature를 계산하여 원본 길이로 로드 (threshold 캘리브레이션용)."""
+    pattern = os.path.join(data_dir, f"{prefix}_*_{label}_raw.npy")
+    files = sorted(glob.glob(pattern))
+    sequences = []
+    for f in files:
+        arr_raw = np.load(f)
+        if arr_raw.ndim != 2 or arr_raw.shape[0] < 5:
+            continue
+        sequences.append(compute_11d_from_raw(arr_raw, acontact_thresh))
+    return sequences
+
+
+def load_sequences_windowed_10d(data_dir: str, prefix: str, label: str,
+                                seq_len: int, stride: int,
+                                exclude_files: set = None,
+                                acontact_thresh: float = 0.1) -> list[np.ndarray]:
+    """_raw.npy에서 10D feature를 계산하여 슬라이딩 윈도우로 로드."""
+    pattern = os.path.join(data_dir, f"{prefix}_*_{label}_raw.npy")
+    files = sorted(glob.glob(pattern))
+    windows = []
+    for f in files:
+        if exclude_files and os.path.basename(f) in exclude_files:
+            print(f"[SKIP-NOISY] {os.path.basename(f)}")
+            continue
+        arr_raw = np.load(f)
+        if arr_raw.ndim != 2 or arr_raw.shape[0] < seq_len:
+            print(f"[SKIP] {os.path.basename(f)}: shape={arr_raw.shape}")
+            continue
+        arr = compute_10d_from_raw(arr_raw, acontact_thresh)
+        n_win = 0
+        for start in range(0, arr.shape[0] - seq_len + 1, stride):
+            windows.append(arr[start:start + seq_len])
+            n_win += 1
+        print(f"[LOAD-10D] {os.path.basename(f)}: {arr_raw.shape}→10D {n_win} windows")
+    return windows
+
+
+def load_sequences_raw_10d(data_dir: str, prefix: str, label: str,
+                            acontact_thresh: float = 0.1) -> list[np.ndarray]:
+    """_raw.npy에서 10D feature를 계산하여 원본 길이로 로드 (threshold 캘리브레이션용)."""
+    pattern = os.path.join(data_dir, f"{prefix}_*_{label}_raw.npy")
+    files = sorted(glob.glob(pattern))
+    sequences = []
+    for f in files:
+        arr_raw = np.load(f)
+        if arr_raw.ndim != 2 or arr_raw.shape[0] < 5:
+            continue
+        sequences.append(compute_10d_from_raw(arr_raw, acontact_thresh))
+    return sequences
+
+
+def load_sequences_windowed_8d(data_dir: str, prefix: str, label: str,
+                               seq_len: int, stride: int,
+                               exclude_files: set = None) -> list[np.ndarray]:
+    """_raw.npy에서 C8D feature를 계산하여 슬라이딩 윈도우로 로드."""
+    pattern = os.path.join(data_dir, f"{prefix}_*_{label}_raw.npy")
+    files = sorted(glob.glob(pattern))
+    windows = []
+    for f in files:
+        if exclude_files and os.path.basename(f) in exclude_files:
+            print(f"[SKIP-NOISY] {os.path.basename(f)}")
+            continue
+        arr_raw = np.load(f)
+        if arr_raw.ndim != 2 or arr_raw.shape[0] < seq_len:
+            print(f"[SKIP] {os.path.basename(f)}: shape={arr_raw.shape}")
+            continue
+        arr = compute_8d_from_raw(arr_raw)
+        n_win = 0
+        for start in range(0, arr.shape[0] - seq_len + 1, stride):
+            windows.append(arr[start:start + seq_len])
+            n_win += 1
+        print(f"[LOAD-8D] {os.path.basename(f)}: {arr_raw.shape}→C8D {n_win} windows")
+    return windows
+
+
+def load_sequences_raw_8d(data_dir: str, prefix: str, label: str) -> list[np.ndarray]:
+    """_raw.npy에서 C8D feature를 계산하여 원본 길이로 로드 (threshold 캘리브레이션용)."""
+    pattern = os.path.join(data_dir, f"{prefix}_*_{label}_raw.npy")
+    files = sorted(glob.glob(pattern))
+    sequences = []
+    for f in files:
+        arr_raw = np.load(f)
+        if arr_raw.ndim != 2 or arr_raw.shape[0] < 5:
+            continue
+        sequences.append(compute_8d_from_raw(arr_raw))
+    return sequences
+
+
+# ─────────────────────────────────────────────
 #  데이터 로딩 유틸
 # ─────────────────────────────────────────────
 def load_sequences_raw(data_dir: str, prefix: str, label: str,
@@ -331,6 +578,43 @@ def load_sequences_windowed(data_dir: str, prefix: str, label: str,
         print(f"[LOAD] {os.path.basename(f)}: {arr.shape} → {n_win} windows (stride={stride})")
 
     return windows
+
+
+def load_sequences_windowed_9d(data_dir: str, prefix: str, label: str,
+                               seq_len: int, stride: int,
+                               exclude_files: set = None) -> list[np.ndarray]:
+    """_raw.npy에서 9D feature를 계산하여 슬라이딩 윈도우로 로드."""
+    pattern = os.path.join(data_dir, f"{prefix}_*_{label}_raw.npy")
+    files = sorted(glob.glob(pattern))
+    windows = []
+    for f in files:
+        if exclude_files and os.path.basename(f) in exclude_files:
+            print(f"[SKIP-NOISY] {os.path.basename(f)}")
+            continue
+        arr_raw = np.load(f)
+        if arr_raw.ndim != 2 or arr_raw.shape[0] < seq_len:
+            print(f"[SKIP] {os.path.basename(f)}: shape={arr_raw.shape}")
+            continue
+        arr = compute_9d_from_raw(arr_raw)
+        n_win = 0
+        for start in range(0, arr.shape[0] - seq_len + 1, stride):
+            windows.append(arr[start:start + seq_len])
+            n_win += 1
+        print(f"[LOAD-9D] {os.path.basename(f)}: {arr_raw.shape}→9D {n_win} windows")
+    return windows
+
+
+def load_sequences_raw_9d(data_dir: str, prefix: str, label: str) -> list[np.ndarray]:
+    """_raw.npy에서 9D feature를 계산하여 원본 길이로 로드 (threshold 캘리브레이션용)."""
+    pattern = os.path.join(data_dir, f"{prefix}_*_{label}_raw.npy")
+    files = sorted(glob.glob(pattern))
+    sequences = []
+    for f in files:
+        arr_raw = np.load(f)
+        if arr_raw.ndim != 2 or arr_raw.shape[0] < 5:
+            continue
+        sequences.append(compute_9d_from_raw(arr_raw))
+    return sequences
 
 
 def fit_scaler(sequences: list[np.ndarray]) -> StandardScaler:
@@ -741,6 +1025,18 @@ def main():
                         help="데이터 디렉토리 (기본: grasp→grasp_data, insert→insert_data)")
     parser.add_argument("--use_raw", action="store_true",
                         help="raw 48D taxel 데이터 사용 (기본: 6D feature)")
+    parser.add_argument("--use_9d", action="store_true",
+                        help="_raw.npy에서 9D feature 계산하여 학습 "
+                             "[mrl,net_norm,max_norm,unit_x,unit_y,unit_z,entropy,std_norm,sum_norm]")
+    parser.add_argument("--use_8d", action="store_true",
+                        help="_raw.npy에서 C8D feature 계산하여 학습 "
+                             "[Fx,Fy,Fz,Mx,My,Mz,Acontact,Fmax] (누적변위 기반 contact representation)")
+    parser.add_argument("--use_10d", action="store_true",
+                        help="_raw.npy에서 10D feature 계산하여 학습 "
+                             "[mrl,norm,Fx,Fy,Fz,Mx,My,Mz,Acontact,Fmax] (6D 고유 + C8D 전체)")
+    parser.add_argument("--use_11d", action="store_true",
+                        help="_raw.npy에서 11D feature 계산하여 학습 "
+                             "[mrl,norm,Fx,Fy,Fz,Mx,My,Mz,Acontact,Fmax,Fnorm] (10D + 합력크기)")
     parser.add_argument("--seq_len", type=int, default=DEFAULTS["seq_len"])
     parser.add_argument("--hidden_dim", type=int, default=DEFAULTS["hidden_dim"])
     parser.add_argument("--num_layers", type=int, default=DEFAULTS["num_layers"])
@@ -779,6 +1075,8 @@ def main():
                         help="Ch-A eval 윈도우 skip 기준 (기본: 30)")
     parser.add_argument("--warmup_b", type=int, default=None,
                         help="threshold_b 보정용 워밍업. 미지정 시 --warmup 값 사용 (runtime Ch-B warmup에 맞춰 30 권장)")
+    parser.add_argument("--acontact_thresh", type=float, default=0.1,
+                        help="Acontact sigmoid 임계값 τ (기본: 0.1, 빡빡하게: 0.3/0.5/1.0)")
     args = parser.parse_args()
     if args.warmup_b is None:
         args.warmup_b = args.warmup
@@ -793,7 +1091,18 @@ def main():
     os.makedirs(data_dir, exist_ok=True)
 
     prefix = args.model   # "grasp" or "insert"
-    suffix = "_raw" if args.use_raw else ""
+    if args.use_11d:
+        suffix = "_11d"
+    elif args.use_10d:
+        suffix = "_10d"
+    elif args.use_8d:
+        suffix = "_8d"
+    elif args.use_9d:
+        suffix = "_9d"
+    elif args.use_raw:
+        suffix = "_raw"
+    else:
+        suffix = ""
 
     model_save_path   = os.path.join(data_dir, f"{prefix}_gru_ae{suffix}.pt")
     scaler_save_path  = os.path.join(data_dir, f"{prefix}_scaler{suffix}.pkl")
@@ -805,7 +1114,7 @@ def main():
     cfg.update(vars(args))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[Config] model={prefix}, use_raw={args.use_raw}, windowed={args.windowed}, "
+    print(f"[Config] model={prefix}, use_raw={args.use_raw}, use_9d={args.use_9d}, use_8d={args.use_8d}, use_10d={args.use_10d}, use_11d={args.use_11d}, windowed={args.windowed}, "
           f"seq_len={cfg['seq_len']}, hidden={cfg['hidden_dim']}, "
           f"layers={cfg['num_layers']}, device={device}")
     print(f"[Config] data_dir={data_dir}")
@@ -823,7 +1132,27 @@ def main():
         print(f"[NoisyFilter] {len(exclude_files)}개 에피소드 학습에서 제외")
 
     # ── success 데이터 로드
-    if args.windowed:
+    if args.use_11d:
+        success_seqs = load_sequences_windowed_11d(data_dir, prefix, "success",
+                                                   cfg["seq_len"], args.win_stride,
+                                                   exclude_files=exclude_files,
+                                                   acontact_thresh=args.acontact_thresh)
+    elif args.use_10d:
+        success_seqs = load_sequences_windowed_10d(data_dir, prefix, "success",
+                                                   cfg["seq_len"], args.win_stride,
+                                                   exclude_files=exclude_files,
+                                                   acontact_thresh=args.acontact_thresh)
+    elif args.use_8d:
+        success_seqs = load_sequences_windowed_8d(data_dir, prefix, "success",
+                                                  cfg["seq_len"], args.win_stride,
+                                                  exclude_files=exclude_files)
+    elif args.use_9d:
+        if not args.windowed:
+            print("[WARN] --use_9d는 --windowed와 함께 사용하는 것을 권장합니다.")
+        success_seqs = load_sequences_windowed_9d(data_dir, prefix, "success",
+                                                  cfg["seq_len"], args.win_stride,
+                                                  exclude_files=exclude_files)
+    elif args.windowed:
         success_seqs = load_sequences_windowed(data_dir, prefix, "success",
                                                args.use_raw, cfg["seq_len"],
                                                args.win_stride,
@@ -937,7 +1266,25 @@ def main():
             print(f"\n[ScoreFilter] {len(bad_files)}개 에피소드 제거 후 재학습...")
             exclude_files = exclude_files | bad_files
             # 재학습
-            if args.windowed:
+            if args.use_11d:
+                success_seqs = load_sequences_windowed_11d(
+                    data_dir, prefix, "success",
+                    cfg["seq_len"], args.win_stride, exclude_files=exclude_files,
+                    acontact_thresh=args.acontact_thresh)
+            elif args.use_10d:
+                success_seqs = load_sequences_windowed_10d(
+                    data_dir, prefix, "success",
+                    cfg["seq_len"], args.win_stride, exclude_files=exclude_files,
+                    acontact_thresh=args.acontact_thresh)
+            elif args.use_8d:
+                success_seqs = load_sequences_windowed_8d(
+                    data_dir, prefix, "success",
+                    cfg["seq_len"], args.win_stride, exclude_files=exclude_files)
+            elif args.use_9d:
+                success_seqs = load_sequences_windowed_9d(
+                    data_dir, prefix, "success",
+                    cfg["seq_len"], args.win_stride, exclude_files=exclude_files)
+            elif args.windowed:
                 success_seqs = load_sequences_windowed(
                     data_dir, prefix, "success", args.use_raw,
                     cfg["seq_len"], args.win_stride, exclude_files=exclude_files)
@@ -980,7 +1327,18 @@ def main():
     # 에피소드 단위 hold-out 분리 (seed=42, val_ratio 동일)
     sys.path.insert(0, "/home/dyros/mcy_ws")
     from dual_channel_detector import calibrate_threshold_b
-    raw_success_all = load_sequences_raw(data_dir, prefix, "success", use_raw=args.use_raw)
+    if args.use_11d:
+        raw_success_all = load_sequences_raw_11d(data_dir, prefix, "success",
+                                                  acontact_thresh=args.acontact_thresh)
+    elif args.use_10d:
+        raw_success_all = load_sequences_raw_10d(data_dir, prefix, "success",
+                                                  acontact_thresh=args.acontact_thresh)
+    elif args.use_8d:
+        raw_success_all = load_sequences_raw_8d(data_dir, prefix, "success")
+    elif args.use_9d:
+        raw_success_all = load_sequences_raw_9d(data_dir, prefix, "success")
+    else:
+        raw_success_all = load_sequences_raw(data_dir, prefix, "success", use_raw=args.use_raw)
     if not raw_success_all:
         raw_success_all = success_seqs  # fallback
     n_ep = len(raw_success_all)
@@ -1000,6 +1358,11 @@ def main():
         "relative":          args.relative,
         "weight_alpha":      args.weight_alpha,
         "use_raw":           args.use_raw,
+        "use_9d":            args.use_9d,
+        "use_8d":            args.use_8d,
+        "use_10d":           args.use_10d,
+        "use_11d":           args.use_11d,
+        "acontact_thresh":   args.acontact_thresh,
         "seq_len":           cfg["seq_len"],
         "hybrid":            args.hybrid,
         "n_rel_dims":        n_rel_dims,
@@ -1014,7 +1377,21 @@ def main():
     if args.eval:
         all_seqs = {"success": success_seqs}
         for label in ["perturbation", "failure"]:
-            if args.windowed:
+            if args.use_11d:
+                seqs = load_sequences_windowed_11d(data_dir, prefix, label,
+                                                   cfg["seq_len"], args.win_stride,
+                                                   acontact_thresh=args.acontact_thresh)
+            elif args.use_10d:
+                seqs = load_sequences_windowed_10d(data_dir, prefix, label,
+                                                   cfg["seq_len"], args.win_stride,
+                                                   acontact_thresh=args.acontact_thresh)
+            elif args.use_8d:
+                seqs = load_sequences_windowed_8d(data_dir, prefix, label,
+                                                  cfg["seq_len"], args.win_stride)
+            elif args.use_9d:
+                seqs = load_sequences_windowed_9d(data_dir, prefix, label,
+                                                  cfg["seq_len"], args.win_stride)
+            elif args.windowed:
                 seqs = load_sequences_windowed(data_dir, prefix, label,
                                                args.use_raw, cfg["seq_len"],
                                                args.win_stride)
@@ -1042,7 +1419,18 @@ def main():
         if raw_success_all:
             raw_seqs_by_label["success"] = raw_success_all
         for label in ["perturbation", "failure"]:
-            seqs = load_sequences_raw(data_dir, prefix, label, use_raw=args.use_raw)
+            if args.use_11d:
+                seqs = load_sequences_raw_11d(data_dir, prefix, label,
+                                              acontact_thresh=args.acontact_thresh)
+            elif args.use_10d:
+                seqs = load_sequences_raw_10d(data_dir, prefix, label,
+                                              acontact_thresh=args.acontact_thresh)
+            elif args.use_8d:
+                seqs = load_sequences_raw_8d(data_dir, prefix, label)
+            elif args.use_9d:
+                seqs = load_sequences_raw_9d(data_dir, prefix, label)
+            else:
+                seqs = load_sequences_raw(data_dir, prefix, label, use_raw=args.use_raw)
             if seqs:
                 raw_seqs_by_label[label] = seqs
         if raw_seqs_by_label:

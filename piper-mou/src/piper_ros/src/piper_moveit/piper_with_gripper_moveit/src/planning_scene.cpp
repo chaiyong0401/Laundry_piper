@@ -11,7 +11,7 @@ using namespace std::chrono_literals;
 
 // double wm_y = 0.11;
 double wm_y = -0.015 + 0.010 + 0.11; // ORIGIN 0.075 -> 0.09 -> 0.11 -> 0.01 -> -0.015 (front panel at y=0.24m), +1.0cm, +11cm
-double wm_x = -0.01 ;  // 세탁기 x축 오프셋 (-1cm)
+double wm_x = -0.015 ;  // 세탁기 x축 오프셋
 
 
 void addBox(moveit::planning_interface::PlanningSceneInterface& psi,
@@ -181,10 +181,10 @@ int main(int argc, char** argv)
   // addBox(psi, "basket_wall_right", {0.004, 0.22, 0.26}, makePose(-0.21, 0.0+basket_y, 0.1));
 
   // // 세탁기 - 앞판 위쪽
-  addBox(psi, "front_top", {0.6860, 0.01, 0.400}, makeRotatedPose(0+wm_x, 0.255+wm_y, 1.25000, 0.00000, 0.00000, 0.00000), 0.5, 0.5, 0.5, 0.3);
+  addBox(psi, "front_top", {0.6860, 0.01, 0.400}, makeRotatedPose(0+wm_x, 0.255+wm_y, 1.24000, 0.00000, 0.00000, 0.00000), 0.5, 0.5, 0.5, 0.3);
   addBox(psi, "front_bottom", {0.6860, 0.010, 0.35}, makeRotatedPose(0+wm_x, 0.255+wm_y, 0.535, 0.00000, 0.00000, 0.00000), 0.5, 0.5, 0.5, 0.3);
   addBox(psi, "front_left", {0.1580, 0.010, 0.370}, makeRotatedPose(0.08600-0.35+wm_x, 0.255+wm_y, 0.885, 0.00000, 0.00000, 0.00000), 0.5, 0.5, 0.5, 0.3);
-  addBox(psi, "front_right", {0.1580, 0.010, 0.370}, makeRotatedPose(0.61400-0.35+wm_x, 0.255+wm_y, 0.885, 0.00000, 0.00000, 0.00000), 0.5, 0.5, 0.5, 0.3);
+  addBox(psi, "front_right", {0.1580, 0.010, 0.370}, makeRotatedPose(0.60400-0.35+wm_x, 0.255+wm_y, 0.885, 0.00000, 0.00000, 0.00000), 0.5, 0.5, 0.5, 0.3);
   addBox(psi, "corner_filler_tr", {0.150, 0.010, 0.150}, makeRotatedPose(0.53500-0.35+wm_x, 0.255+wm_y, 1.06000, 0.00000, -0.78540, 0.00000), 0.5, 0.5, 0.5, 0.3);
   addBox(psi, "corner_filler_tl", {0.150, 0.010, 0.150}, makeRotatedPose(0.16500-0.35+wm_x, 0.255+wm_y, 1.06000, 0.00000, -0.78540, 0.00000), 0.5, 0.5, 0.5, 0.3);
   addBox(psi, "corner_filler_br", {0.150, 0.010, 0.150}, makeRotatedPose(0.53500-0.35+0.01+wm_x, 0.255+wm_y, 0.7200, 0.00000, -0.78540, 0.00000), 0.5, 0.5, 0.5, 0.3);

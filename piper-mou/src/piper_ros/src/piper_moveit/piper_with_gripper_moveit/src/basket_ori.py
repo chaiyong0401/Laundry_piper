@@ -36,6 +36,12 @@ import os
 import datetime
 import argparse
 
+from transport_features import (
+    compute_transport_9d_from_baseline,
+    compute_transport_9d_relative,
+    compute_transport_11d_delta,
+)
+
 
 ########################## 비지도 클러스터링 ####################################################
 
@@ -117,14 +123,37 @@ def build_pin_model(urdf_or_xacro: str):
 
 class ControlTower(Node):
 
-    def __init__(self, run_mode: str = 'normal', use_tactile_api: bool = False):
+    def __init__(self, run_mode: str = 'normal', use_tactile_api: bool = False,
+                 threshold_a_override: float = None,
+                 infer_stride_override: int = None,
+                 consec_override: int = None):
         super().__init__('control_tower_node')
         # run_mode: 'normal'   → 기존 동작 (rule-based 판단, 데이터 수집 없음)
         #           'collect'  → 데이터 수집 모드 (human labeling)
         #           'inference'→ 학습된 GRU-AE로 판단
-        self.run_mode = run_mode
+        #           'new_11d'  → revised 11D + first-frame Codex 모델 실험
+        #           'new_9d_relative' → stable-baseline relative 9D 모델 실험
+        self.requested_run_mode = run_mode
+        self.transport_new_11d_mode = (run_mode == 'new_11d')
+        self.transport_new_9d_relative_mode = (
+            run_mode == 'new_9d_relative')
+        self.transport_codex_mode = (
+            self.transport_new_11d_mode or
+            self.transport_new_9d_relative_mode)
+        if self.transport_codex_mode and use_tactile_api:
+            raise RuntimeError(
+                "new_11d/new_9d_relative 모드는 현재 "
+                "--use_tactile_api와 함께 사용할 수 없습니다.")
+        # 기존 sequence 로직에서 new_11d는 inference와 완전히 같은 생명주기를
+        # 사용하고, transport 모델 선택만 전용 artifact로 바꾼다.
+        self.run_mode = 'inference' if self.transport_codex_mode else run_mode
         self.use_tactile_api = use_tactile_api
-        self.get_logger().info(f"[MODE] 실행 모드: {self.run_mode}, use_tactile_api={self.use_tactile_api}")
+        self.transport_threshold_a_override = threshold_a_override
+        self.transport_infer_stride_override = infer_stride_override
+        self.transport_consec_override = consec_override
+        self.get_logger().info(
+            f"[MODE] 요청 모드: {self.requested_run_mode}, "
+            f"내부 모드: {self.run_mode}, use_tactile_api={self.use_tactile_api}")
 
         self._timing_log = []  # [(label, elapsed_sec), ...]
 
@@ -181,9 +210,12 @@ class ControlTower(Node):
 
         self.is_insert_recording = False
         self.insert_buffer = []         # Model 2: 6D feature 시계열
-        self.insert_raw_buffer = []     # Model 2: raw taxel 48D 시계열
+        self.insert_raw_buffer = []     # Model 2: raw taxel 48D cumulative-diff 시계열
+        self.insert_abs_buffer = []     # Model 2: raw taxel 48D absolute 시계열
         self.insert_save_dir = "/home/dyros/mcy_ws/transport_new"
         os.makedirs(self.insert_save_dir, exist_ok=True)
+        self.insert_infer_save_dir = "/home/dyros/mcy_ws/transport_infer"
+        os.makedirs(self.insert_infer_save_dir, exist_ok=True)
 
         # [INFERENCE] Model 1 (grasp) GRU-AE + 채널 B
         self.gru_ae_model      = None
@@ -201,6 +233,13 @@ class ControlTower(Node):
         self.insert_gru_ae_infer_cfg = {"relative": "none", "weight_alpha": 0.0}
         self.transport_channel_b     = None   # FramewiseDeltaDetector
         self.insert_max_mrl_seen     = 0.0
+        self.transport_use_9d        = False  # 9D feature 모델 사용 여부
+        self.transport_use_8d        = False  # C8D feature 모델 사용 여부
+        self.transport_use_10d       = False  # 10D feature 모델 사용 여부
+        self.transport_use_11d       = False  # 11D feature 모델 사용 여부
+        self.transport_use_11d_codex = False  # revised 11D first-frame 모델
+        self.transport_use_9d_relative = False  # stable-baseline relative 9D
+        self._transport_9d_relative_baseline = None
 
         self.grasp_api_detector = None  # DualChannelDetector (use_tactile_api=True 시 사용)
         self.insert_api_detector = None # DualChannelDetector (use_tactile_api=True 시 사용)
@@ -208,6 +247,11 @@ class ControlTower(Node):
         if self.run_mode == 'inference':
             self._load_gru_ae()
             self._load_insert_gru_ae()
+            if (self.transport_codex_mode and
+                    self.insert_gru_ae_model is None):
+                raise RuntimeError(
+                    "실험용 Transport 모델 로드에 실패했습니다. "
+                    "위 artifact 오류를 확인하세요.")
             if self.use_tactile_api:
                 self._load_grasp_api_detector()
                 self._load_insert_api_detector()
@@ -216,14 +260,16 @@ class ControlTower(Node):
         self.realtime_buffer     = deque(maxlen=50)   # 6D feature 실시간 버퍼
         self.realtime_raw_buffer = deque(maxlen=50)   # 48D raw taxel 실시간 버퍼
         self.inference_stride    = 10
+        self.insert_inference_stride = 10
         self.inference_frame_cnt = 0
         self.infer_consec_normal         = 0
         self.infer_consec_needed         = 3
         self.infer_consec_anomaly        = 0   # 채널 A 연속 이상 카운터
-        self.infer_consec_anomaly_needed = 2   # 이상 확정에 필요한 연속 횟수
+        self.infer_consec_anomaly_needed = 1   # 이상 확정에 필요한 연속 횟수
         self.infer_latest_score          = None
         self.infer_grasp_anomaly_detected = False  # recording 중 연속 이상 달성 여부 (eval 기준)
         self.grasp_detect_channel        = 'none' # 이상 확정 시 감지 채널 ('A','B','AB')
+        self.grasp_max_mrl_seen          = 0.0    # grasp 구간 최대 MRL (rule1 miss-guard 용)
         self.grasp_channel_b_flag        = False  # 채널 B 이상 확정 플래그
         self.grasp_channel_b_consec      = 0      # 채널 B 연속 이상 프레임 수
         self.grasp_channel_b_consec_needed = 5    # 채널 B 이상 확정 프레임 수
@@ -247,6 +293,24 @@ class ControlTower(Node):
         self.transport_channel_b_consec_needed = 5
         self.transport_channel_b_warmup_needed = 30  # 이송 초기 모션 아티팩트 무시 프레임 수
         self.transport_delta_b_latest         = 0.0
+        self.transport_delta_b_current        = 0.0  # 매 프레임 갱신 (로그용)
+        self._transport_ch_b_acontact_ema     = None  # abs Acontact EMA baseline
+        self._transport_ch_b_fmax_z_ema       = None  # abs Fmax_z EMA baseline
+
+        # Channel B sensor references.
+        # 1) _sensor_zero_raw: empty-gripper DC offset for every taxel/axis.
+        # 2) transport baselines: stable grasp level measured during warmup.
+        self._sensor_raw_lock                 = threading.Lock()
+        self._sensor_raw_samples              = deque(maxlen=120)
+        self._sensor_zero_raw                 = None       # (16, 3), unnormalised sensor units
+        self._sensor_contact_threshold        = 0.03       # zero-corrected, range-normalised units
+        self._sensor_zero_warned              = False
+        self._transport_ch_b_warmup_contact   = deque(maxlen=self.transport_channel_b_warmup_needed)
+        self._transport_ch_b_warmup_force     = deque(maxlen=self.transport_channel_b_warmup_needed)
+        self._transport_ch_b_contact_baseline = None
+        self._transport_ch_b_force_baseline   = None
+        self.transport_ch_b_contact_drop_threshold = 0.25
+        self.transport_ch_b_force_drop_threshold   = 0.30
 
         # [SENSOR PROCESSING THREAD] sensor_callback은 raw 데이터만 큐에 넣고 즉시 리턴
         # 모든 numpy 연산과 상태 업데이트는 이 스레드에서 수행 → DDS 버퍼 블로킹 방지
@@ -537,7 +601,7 @@ class ControlTower(Node):
 
         # Dynamic Duration Calculation to prevent "Status 6" (Too Slow/Fast)
         # fast=True (물체 미파지): 1.5 rad/s, fast=False (물체 파지 중): 0.5 rad/s
-        rad_per_sec = 1.5 if fast else 0.5
+        rad_per_sec = 1.5 if fast else 0.3
         duration_sec = 3.0 # Default fallback
 
         try:
@@ -1286,6 +1350,58 @@ class ControlTower(Node):
         self.z_aligned, self.contacted = False, False
         self.get_logger().info("센서 기준값 및 상태 초기화 완료.")
 
+    def _capture_empty_gripper_reference(self, sample_count: int = 20,
+                                         timeout_sec: float = 2.0) -> bool:
+        """Capture the per-taxel DC offset while the open gripper is stationary."""
+        with self._sensor_raw_lock:
+            self._sensor_raw_samples.clear()
+
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            with self._sensor_raw_lock:
+                count = len(self._sensor_raw_samples)
+            if count >= sample_count:
+                break
+            time.sleep(0.02)
+
+        with self._sensor_raw_lock:
+            samples = list(self._sensor_raw_samples)[-sample_count:]
+
+        if len(samples) < 5:
+            self.get_logger().warn(
+                f"[CH-B] 무부하 기준값 수집 실패: {len(samples)}/{sample_count} frames")
+            return False
+
+        sample_arr = np.asarray(samples, dtype=np.float64)  # (T, 16, 3), raw units
+        zero_raw = np.median(sample_arr, axis=0)
+        scale = np.column_stack((
+            self.grng[0:16], self.grng[16:32], self.grng[32:48]
+        ))
+        scale = np.maximum(scale, 1.0)
+        zero_force = np.linalg.norm((sample_arr - zero_raw) / scale, axis=2)
+        # The floor prevents an unrealistically tiny contact threshold when the
+        # empty sensor is perfectly still during this short capture.
+        noise_p99 = float(np.percentile(zero_force, 99.0))
+        self._sensor_zero_raw = zero_raw
+        self._sensor_contact_threshold = max(0.03, noise_p99 * 3.0)
+        self._sensor_zero_warned = False
+        self.get_logger().info(
+            f"[CH-B] 무부하 기준값 설정 완료: frames={len(samples)}, "
+            f"noise_p99={noise_p99:.4f}, contact_thr={self._sensor_contact_threshold:.4f}")
+        return True
+
+    def _reset_transport_channel_b_state(self):
+        """Reset per-transport Channel B and relative-feature baselines."""
+        self._transport_ch_b_warmup_contact.clear()
+        self._transport_ch_b_warmup_force.clear()
+        self._transport_ch_b_contact_baseline = None
+        self._transport_ch_b_force_baseline = None
+        self.transport_channel_b_consec = 0
+        self.transport_channel_b_flag = False
+        self.transport_delta_b_latest = 0.0
+        self.transport_delta_b_current = 0.0
+        self._transport_9d_relative_baseline = None
+
     def _spin_input(self, prompt: str) -> str:
         """input()을 별도 스레드에서 실행하며 대기.
         MultiThreadedExecutor가 이미 다른 스레드에서 spin() 중이므로
@@ -1337,8 +1453,17 @@ class ControlTower(Node):
                 self._infer_trigger.clear()
                 score_a = self._run_windowed_inference()
                 if score_a is not None:
+                    cfg = self.gru_ae_infer_cfg
+                    mrl_thresh  = float(cfg.get("mrl_thresh", 0.2))
+                    cutoff_mult = float(cfg.get("cutoff_multiplier", 2.2))
                     with self._infer_lock:
-                        flag_a = score_a > self.gru_ae_threshold
+                        # Rule 1: Miss Guard Rail — 창이 다 찼는데 MRL이 한번도 안 올라왔으면 미파지
+                        flag_a_rule1 = (self.grasp_max_mrl_seen < mrl_thresh)
+                        # Rule 2: Super High Error Cutoff — 즉시 이상 확정 (consec 대기 없음)
+                        flag_a_rule2 = (score_a > self.gru_ae_threshold * cutoff_mult)
+                        # Rule 3: Regular Threshold — 연속 consec 판정
+                        flag_a_rule3 = (score_a > self.gru_ae_threshold)
+                        flag_a = flag_a_rule1 or flag_a_rule2 or flag_a_rule3
                         flag_b = self.grasp_channel_b_flag
                         self.grasp_channel_b_flag = False  # 읽은 후 초기화 (sticky 방지)
                         is_anomaly = flag_a or flag_b
@@ -1347,7 +1472,10 @@ class ControlTower(Node):
                                    'B'  if flag_b else 'none')
                         self.infer_latest_score = score_a
                         if is_anomaly:
-                            self.infer_consec_anomaly += 1
+                            if flag_a_rule1 or flag_a_rule2 or flag_b:
+                                self.infer_consec_anomaly = self.infer_consec_anomaly_needed
+                            else:
+                                self.infer_consec_anomaly += 1
                             self.infer_consec_normal = 0
                             if self.infer_consec_anomaly >= self.infer_consec_anomaly_needed:
                                 self.infer_grasp_anomaly_detected = True
@@ -1358,6 +1486,7 @@ class ControlTower(Node):
                         self.get_logger().info(
                             f"[GRASP] score_A={score_a:.4f} "
                             f"thr_A={self.gru_ae_threshold:.4f} "
+                            f"(rule1={flag_a_rule1}, rule2={flag_a_rule2}) "
                             f"delta_B={self.grasp_delta_b_latest:.4f} "
                             f"thr_B={self.gru_ae_threshold_b:.4f} "
                             f"ch={channel} "
@@ -1372,11 +1501,15 @@ class ControlTower(Node):
                 if score_a is not None:
                     cfg = getattr(self, "insert_gru_ae_infer_cfg", {})
                     mrl_thresh = float(cfg.get("mrl_thresh", 0.2))
+                    mrl_guard_enabled = bool(
+                        cfg.get("mrl_guard_enabled", True))
                     cutoff_mult = float(cfg.get("cutoff_multiplier", 2.2))
                     
                     with self._infer_lock:
                         # Rule 1: Miss Guard Rail
-                        flag_a_rule1 = (self.insert_max_mrl_seen < mrl_thresh)
+                        flag_a_rule1 = (
+                            mrl_guard_enabled and
+                            self.insert_max_mrl_seen < mrl_thresh)
                         # Rule 2: Super High Error Cutoff
                         flag_a_rule2 = (score_a > self.insert_gru_ae_threshold * cutoff_mult)
                         # Rule 3: Regular Threshold
@@ -1415,7 +1548,7 @@ class ControlTower(Node):
                         self.get_logger().info(
                             f"[TRANSPORT] score_A={score_a:.4f} "
                             f"thr_A={self.insert_gru_ae_threshold:.4f} "
-                            f"delta_B={self.transport_delta_b_latest:.4f} "
+                            f"delta_B={self.transport_delta_b_current:.4f} "
                             f"thr_B={self.insert_gru_ae_threshold_b:.4f} "
                             f"ch={channel} "
                             f"{'ANOMALY' if is_anomaly else 'normal'} "
@@ -1592,12 +1725,35 @@ class ControlTower(Node):
 
     def _load_insert_gru_ae(self):
         """학습된 Transport GRU-AE 모델 + scaler + threshold A/B + infer_cfg 로드 (Model 2)."""
+        if self.transport_codex_mode:
+            self._load_insert_gru_ae_codex()
+            return
+
         import torch
         import joblib
         import pickle
         data_dir    = self.insert_save_dir
-        use_raw     = os.path.exists(os.path.join(data_dir, "transport_gru_ae_raw.pt"))
-        suffix      = "_raw" if use_raw else ""
+        use_11d     = os.path.exists(os.path.join(data_dir, "transport_gru_ae_11d.pt"))
+        use_10d     = not use_11d and os.path.exists(os.path.join(data_dir, "transport_gru_ae_10d.pt"))
+        use_8d      = not use_11d and not use_10d and os.path.exists(os.path.join(data_dir, "transport_gru_ae_8d.pt"))
+        use_9d      = not use_11d and not use_10d and not use_8d and os.path.exists(os.path.join(data_dir, "transport_gru_ae_9d.pt"))
+        use_raw     = not use_11d and not use_10d and not use_8d and not use_9d and os.path.exists(os.path.join(data_dir, "transport_gru_ae_raw.pt"))
+        if use_11d:
+            suffix  = "_11d"
+        elif use_10d:
+            suffix  = "_10d"
+        elif use_8d:
+            suffix  = "_8d"
+        elif use_9d:
+            suffix  = "_9d"
+        elif use_raw:
+            suffix  = "_raw"
+        else:
+            suffix  = ""
+        self.transport_use_11d = use_11d
+        self.transport_use_10d = use_10d
+        self.transport_use_8d = use_8d
+        self.transport_use_9d = use_9d
         model_path    = os.path.join(data_dir, f"transport_gru_ae{suffix}.pt")
         scaler_path   = os.path.join(data_dir, f"transport_scaler{suffix}.pkl")
         thresh_path   = os.path.join(data_dir, f"transport_threshold{suffix}.npy")
@@ -1634,10 +1790,14 @@ class ControlTower(Node):
                 self.insert_gru_ae_cutoff_multiplier = float(self.insert_gru_ae_infer_cfg.get("cutoff_multiplier", 2.2))
             self.transport_channel_b = FramewiseDeltaDetector(
                 delta_threshold=self.insert_gru_ae_threshold_b, smooth_window=3)
-            self.insert_gru_ae_infer_cfg["use_raw"] = use_raw
+            self.insert_gru_ae_infer_cfg["use_raw"]  = use_raw
+            self.insert_gru_ae_infer_cfg["use_9d"]   = use_9d
+            self.insert_gru_ae_infer_cfg["use_8d"]   = use_8d
+            self.insert_gru_ae_infer_cfg["use_10d"]  = use_10d
+            self.insert_gru_ae_infer_cfg["use_11d"]  = use_11d
             self.get_logger().info(
                 f"[INFERENCE] Transport GRU-AE 로드 완료 "
-                f"(input_dim={input_dim}, use_raw={use_raw}, "
+                f"(input_dim={input_dim}, use_11d={use_11d}, use_10d={use_10d}, use_8d={use_8d}, use_9d={use_9d}, use_raw={use_raw}, "
                 f"thr_A={self.insert_gru_ae_threshold:.6f}, "
                 f"thr_B={self.insert_gru_ae_threshold_b:.6f}, "
                 f"mrl_thresh={self.insert_gru_ae_mrl_thresh:.2f}, "
@@ -1646,6 +1806,153 @@ class ControlTower(Node):
         except Exception as e:
             self.get_logger().error(f"[INFERENCE] Transport 모델 로드 실패: {e}")
 
+    def _load_insert_gru_ae_codex(self):
+        """Load a Codex first-frame transport model selected by run mode."""
+        import json
+        import joblib
+        import pickle
+        import torch
+
+        if self.transport_new_9d_relative_mode:
+            artifact_name = "codex_model_9d_relative_firstframe"
+            suffix = "_9d_relative"
+            expected_flag = "use_9d_relative"
+            log_tag = "NEW-9D-REL"
+        else:
+            artifact_name = "codex_model_firstframe"
+            suffix = "_11d_codex"
+            expected_flag = "use_11d_codex"
+            log_tag = "NEW-11D"
+
+        artifact_dir = os.path.join(self.insert_save_dir, artifact_name)
+        model_path = os.path.join(
+            artifact_dir, f"transport_gru_ae{suffix}.pt")
+        scaler_path = os.path.join(
+            artifact_dir, f"transport_scaler{suffix}.pkl")
+        thresh_path = os.path.join(
+            artifact_dir, f"transport_threshold{suffix}.npy")
+        cfg_path = os.path.join(
+            artifact_dir, f"transport_infer_cfg{suffix}.pkl")
+        report_path = os.path.join(
+            artifact_dir, f"transport_codex_report{suffix}.json")
+
+        required = [
+            model_path, scaler_path, thresh_path, cfg_path, report_path]
+        missing = [path for path in required if not os.path.exists(path)]
+        if missing:
+            for path in missing:
+                self.get_logger().error(
+                    f"[{log_tag}] 필수 artifact 없음: {path}")
+            return
+
+        try:
+            sys.path.insert(0, "/home/dyros/mcy_ws")
+            from train_gru_ae import GRUAE
+
+            with open(cfg_path, "rb") as stream:
+                infer_cfg = pickle.load(stream)
+            with open(report_path) as stream:
+                report = json.load(stream)
+            train_cfg = report.get("config", {})
+
+            if not infer_cfg.get(expected_flag, False):
+                raise RuntimeError(
+                    f"infer config is not marked as {expected_flag}")
+            if infer_cfg.get("relative") != "first_frame":
+                raise RuntimeError(
+                    f"{log_tag} real check requires relative=first_frame")
+
+            scaler = joblib.load(scaler_path)
+            input_dim = int(scaler.n_features_in_)
+            expected_input_dim = (
+                9 if self.transport_new_9d_relative_mode else 11)
+            if input_dim != expected_input_dim:
+                raise RuntimeError(
+                    f"{log_tag} input_dim mismatch: "
+                    f"expected {expected_input_dim}, got {input_dim}")
+            hidden_dim = int(train_cfg["hidden_dim"])
+            num_layers = int(train_cfg["num_layers"])
+            dropout = float(train_cfg["dropout"])
+            seq_len = int(infer_cfg.get("seq_len", 50))
+            if seq_len != 50:
+                raise RuntimeError(
+                    f"{log_tag} online buffer requires seq_len=50, "
+                    f"got {seq_len}")
+
+            checkpoint = torch.load(
+                model_path, map_location="cpu", weights_only=True)
+            model = GRUAE(
+                input_dim=input_dim,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                dropout=dropout,
+                seq_len=seq_len,
+            )
+            model.load_state_dict(checkpoint)
+            model.eval()
+
+            infer_cfg["consec"] = int(train_cfg.get("consec", 2))
+            self.insert_gru_ae_model = model
+            self.insert_gru_ae_scaler = scaler
+            self.insert_gru_ae_threshold = float(np.load(thresh_path)[0])
+            self.insert_gru_ae_infer_cfg = infer_cfg
+            self.insert_gru_ae_mrl_thresh = float(
+                infer_cfg.get("mrl_thresh", 0.3))
+            self.insert_gru_ae_cutoff_multiplier = float(
+                infer_cfg.get("cutoff_multiplier", 2.2))
+
+            self.transport_use_11d_codex = self.transport_new_11d_mode
+            self.transport_use_9d_relative = (
+                self.transport_new_9d_relative_mode)
+            self.transport_use_11d = False
+            self.transport_use_10d = False
+            self.transport_use_8d = False
+            self.transport_use_9d = False
+            self.insert_inference_stride = int(
+                infer_cfg.get("inference_stride", 10))
+            self.insert_infer_consec_anomaly_needed = int(
+                infer_cfg["consec"])
+
+            applied_overrides = []
+            if self.transport_threshold_a_override is not None:
+                self.insert_gru_ae_threshold = float(
+                    self.transport_threshold_a_override)
+                applied_overrides.append(
+                    f"threshold_A={self.insert_gru_ae_threshold:.6f}")
+            if self.transport_infer_stride_override is not None:
+                self.insert_inference_stride = int(
+                    self.transport_infer_stride_override)
+                applied_overrides.append(
+                    f"stride={self.insert_inference_stride}")
+            if self.transport_consec_override is not None:
+                self.insert_infer_consec_anomaly_needed = int(
+                    self.transport_consec_override)
+                applied_overrides.append(
+                    f"consec={self.insert_infer_consec_anomaly_needed}")
+
+            self.get_logger().info(
+                f"[{log_tag}] Transport Codex 모델 로드 완료 "
+                f"(input_dim={input_dim}, hidden={hidden_dim}, "
+                f"layers={num_layers}, relative={infer_cfg['relative']}, "
+                f"thr_A={self.insert_gru_ae_threshold:.6f}, "
+                f"stride={self.insert_inference_stride}, "
+                f"consec={self.insert_infer_consec_anomaly_needed}, "
+                f"cutoff_mult={self.insert_gru_ae_cutoff_multiplier:.2f})")
+            if applied_overrides:
+                self.get_logger().warn(
+                    f"[{log_tag}] Runtime override 적용: " +
+                    ", ".join(applied_overrides))
+            self.get_logger().warn(
+                f"[{log_tag}] 실제 검증 모드입니다. Channel A 또는 B 감지 시 "
+                "기존 inference와 동일하게 이동 중단/복구가 실행됩니다.")
+        except Exception as e:
+            self.transport_use_11d_codex = False
+            self.transport_use_9d_relative = False
+            self.insert_gru_ae_model = None
+            self.insert_gru_ae_scaler = None
+            self.get_logger().error(
+                f"[{log_tag}] Transport 모델 로드 실패: {e}")
+
     def _load_insert_api_detector(self):
         """tactile_anomaly.DualChannelDetector 로드 (Model 2, use_tactile_api=True 시 사용)."""
         try:
@@ -1653,8 +1960,23 @@ class ControlTower(Node):
             sys.path.insert(0, "/home/dyros/mcy_ws")
             from tactile_anomaly.detector import DualChannelDetector
             data_dir = self.insert_save_dir
-            use_raw = os.path.exists(os.path.join(data_dir, "transport_gru_ae_raw.pt"))
-            suffix = "_raw" if use_raw else ""
+            use_11d  = os.path.exists(os.path.join(data_dir, "transport_gru_ae_11d.pt"))
+            use_10d  = not use_11d and os.path.exists(os.path.join(data_dir, "transport_gru_ae_10d.pt"))
+            use_8d   = not use_11d and not use_10d and os.path.exists(os.path.join(data_dir, "transport_gru_ae_8d.pt"))
+            use_9d   = not use_11d and not use_10d and not use_8d and os.path.exists(os.path.join(data_dir, "transport_gru_ae_9d.pt"))
+            use_raw  = not use_11d and not use_10d and not use_8d and not use_9d and os.path.exists(os.path.join(data_dir, "transport_gru_ae_raw.pt"))
+            if use_11d:
+                suffix = "_11d"
+            elif use_10d:
+                suffix = "_10d"
+            elif use_8d:
+                suffix = "_8d"
+            elif use_9d:
+                suffix = "_9d"
+            elif use_raw:
+                suffix = "_raw"
+            else:
+                suffix = ""
             model_path    = os.path.join(data_dir, f"transport_gru_ae{suffix}.pt")
             scaler_path   = os.path.join(data_dir, f"transport_scaler{suffix}.pkl")
             thresh_path   = os.path.join(data_dir, f"transport_threshold{suffix}.npy")
@@ -1709,19 +2031,30 @@ class ControlTower(Node):
             self.get_logger().error(f"[SLIDING-INSERT] inference error: {e}")
             return None
 
-    def _save_insert_data(self, label: str):
+    def _save_insert_data(self, label: str, save_dir: str = None):
         """수집된 이송 구간(ba_init → open_gripper) 시계열을 레이블과 함께 저장."""
         if len(self.insert_buffer) < 10:
             self.get_logger().warn(f"[DATA] 이송 프레임 수 부족 ({len(self.insert_buffer)}), 저장 스킵")
             return
+        target_dir = save_dir or self.insert_save_dir
+        os.makedirs(target_dir, exist_ok=True)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        seq = np.array(self.insert_buffer, dtype=np.float32)       # [T, 6]
-        fname = os.path.join(self.insert_save_dir, f"transport_{ts}_{label}.npy")
+        seq = np.array(self.insert_buffer, dtype=np.float32)       # [T, D]
+        fname = os.path.join(target_dir, f"transport_{ts}_{label}.npy")
         np.save(fname, seq)
-        raw = np.array(self.insert_raw_buffer, dtype=np.float32)   # [T, 48]
-        fname_raw = os.path.join(self.insert_save_dir, f"transport_{ts}_{label}_raw.npy")
+        raw = np.array(self.insert_raw_buffer, dtype=np.float32)   # [T, 48] cumulative diff
+        fname_raw = os.path.join(target_dir, f"transport_{ts}_{label}_raw.npy")
         np.save(fname_raw, raw)
-        self.get_logger().info(f"[DATA] 이송 저장 완료: {fname} (shape={seq.shape}), raw: {raw.shape}")
+        if self.insert_abs_buffer:
+            abs_arr = np.array(self.insert_abs_buffer, dtype=np.float32)  # [T, 48] absolute
+            fname_abs = os.path.join(target_dir, f"transport_{ts}_{label}_abs.npy")
+            np.save(fname_abs, abs_arr)
+            self.get_logger().info(
+                f"[DATA] 이송 저장 완료: {fname} (shape={seq.shape}), "
+                f"raw: {raw.shape}, abs: {abs_arr.shape}"
+            )
+        else:
+            self.get_logger().info(f"[DATA] 이송 저장 완료: {fname} (shape={seq.shape}), raw: {raw.shape}")
 
     def _ask_insertion_result(self):
         """open_gripper 직전: 이송 구간 파지 유지 성공 여부를 사람에게 확인.
@@ -1882,6 +2215,10 @@ class ControlTower(Node):
                 continue
             _prev_raw_x, _prev_raw_y, _prev_raw_z = x_vals, y_vals, z_vals
 
+            raw_sensor_vecs = np.column_stack((x_vals, y_vals, z_vals)).astype(np.float64)
+            with self._sensor_raw_lock:
+                self._sensor_raw_samples.append(raw_sensor_vecs.copy())
+
             try:
                 x_vals, y_vals, z_vals = self._normalize_taxels(x_vals, y_vals, z_vals)
 
@@ -1906,18 +2243,18 @@ class ControlTower(Node):
                     max(abs(d) for d in dz),
                 )
                 if _max_jump > 0.5:
-                    self.cum_x = [0.0] * 16
-                    self.cum_y = [0.0] * 16
-                    self.cum_z = [0.0] * 16
-                    self.prev_x, self.prev_y, self.prev_z = x_vals, y_vals, z_vals
-                    _prev_raw_x = _prev_raw_y = _prev_raw_z = None
                     if self.is_insert_recording:
-                        # 이송 중 점프 = 낙하로 인한 센서 급감일 수 있음 → 버퍼/카운터 유지
+                        # 이송 중 점프 = 실제 slip/drop 신호 → 누적값 유지하여 채널 B에 반영
                         self.get_logger().warn(
-                            f"[SENSOR] 점프 감지 (max_diff={_max_jump:.3f}) → 누적값 리셋 (이송 중: 버퍼 유지)"
+                            f"[SENSOR] 점프 감지 (max_diff={_max_jump:.3f}) → 이송 중: 누적값 유지"
                         )
                     else:
-                        # 이송 외 구간: WebSocket 재연결 아티팩트 → 버퍼 flush
+                        # 이송 외 구간: WebSocket 재연결 아티팩트 → 누적값 리셋 + 버퍼 flush
+                        self.cum_x = [0.0] * 16
+                        self.cum_y = [0.0] * 16
+                        self.cum_z = [0.0] * 16
+                        self.prev_x, self.prev_y, self.prev_z = x_vals, y_vals, z_vals
+                        _prev_raw_x = _prev_raw_y = _prev_raw_z = None
                         self.insert_realtime_buffer.clear()
                         self.insert_realtime_raw_buffer.clear()
                         with self._infer_lock:
@@ -1926,7 +2263,7 @@ class ControlTower(Node):
                         self.get_logger().warn(
                             f"[SENSOR] 점프 감지 (max_diff={_max_jump:.3f}) → 누적값 리셋 + inference 버퍼 flush"
                         )
-                    continue
+                        continue
 
                 for i in range(16):
                     self.cum_x[i] += dx[i]
@@ -1963,7 +2300,7 @@ class ControlTower(Node):
                     mrl = 0.0
                 self.mrl = mrl
 
-                # 6D feature
+                # 6D feature (grasp model)
                 frame = [
                     mrl,
                     float(norm),
@@ -1972,11 +2309,63 @@ class ControlTower(Node):
                     float(mean_unit[1]),
                     float(mean_unit[2]),
                 ]
+                # 9D feature (transport 9D model)
+                _sum_norm = float(np.sum(norms))
+                _p_norm = norms / (_sum_norm + 1e-8) + 1e-10
+                frame_9d = frame + [
+                    float(-np.sum(_p_norm * np.log(_p_norm))),
+                    float(np.std(norms)),
+                    _sum_norm,
+                ]
+                # C8D / 10D 공통 계산
+                _ci = np.array([[(c - 1.5), (1.5 - r), 0.0]
+                                for r in range(4) for c in range(4)], dtype=np.float64)
+                _F = vecs.sum(axis=0)
+                _cross = np.cross(_ci, vecs)
+                _M = _cross.sum(axis=0)
+                _ac_thresh = float(self.insert_gru_ae_infer_cfg.get('acontact_thresh', 0.1))
+                _Acontact = float(np.sum(1.0 / (1.0 + np.exp(-10.0 * (vecs[:, 2] - _ac_thresh)))))
+                _Fmax_z = float(vecs[:, 2].max())   # z방향 최대 taxel값 (compute_10d/11d 기준)
+                # C8D feature (transport 8D model): [Fx,Fy,Fz,Mx,My,Mz,Acontact,Fmax]
+                frame_8d = [
+                    float(_F[0]), float(_F[1]), float(_F[2]),
+                    float(_M[0]), float(_M[1]), float(_M[2]),
+                    _Acontact,
+                    float(max_norm),
+                ]
+                # 10D feature: [mrl, norm_mean, Fx,Fy,Fz, Mx,My,Mz, Acontact, Fmax_z]
+                _norm_mean = float(np.mean(norms))
+                frame_10d = [
+                    mrl,
+                    _norm_mean,
+                    float(_F[0]), float(_F[1]), float(_F[2]),
+                    float(_M[0]), float(_M[1]), float(_M[2]),
+                    _Acontact,
+                    _Fmax_z,
+                ]
+                # 11D feature: 10D + Fnorm=|F|
+                _Fnorm = float(np.sqrt(_F[0]**2 + _F[1]**2 + _F[2]**2))
+                frame_11d = frame_10d + [_Fnorm]
                 raw_frame = vecs.flatten().tolist()
+                # 절대 센서 값: taxel i = (x_i, y_i, z_i), 누적차분 아닌 현재 normalized 값
+                abs_vecs = np.array([x_vals, y_vals, z_vals]).T  # (16, 3)
+                abs_frame = abs_vecs.flatten().tolist()           # 48D
+                if self.is_insert_recording and self.insert_infer_frame_cnt % 30 == 0:
+                    if self._sensor_zero_raw is not None:
+                        _dbg_scale = np.column_stack((
+                            self.grng[0:16], self.grng[16:32], self.grng[32:48]
+                        ))
+                        _dbg_force = np.linalg.norm(
+                            (raw_sensor_vecs - self._sensor_zero_raw) /
+                            np.maximum(_dbg_scale, 1.0), axis=1)
+                        print(
+                            f"[CONTACT-DBG] force min={_dbg_force.min():.4f} "
+                            f"max={_dbg_force.max():.4f} mean={_dbg_force.mean():.4f}")
 
                 if self.is_recording:
                     self.grasp_buffer.append(frame)
                     self.grasp_raw_buffer.append(raw_frame)
+                    self.grasp_max_mrl_seen = max(self.grasp_max_mrl_seen, mrl)
                     if self.run_mode == 'inference':
                         if self.use_tactile_api and self.grasp_api_detector is not None:
                             # ── API 경로: DualChannelDetector가 채널 A+B를 동시에 처리
@@ -2038,12 +2427,92 @@ class ControlTower(Node):
                                     self.grasp_channel_b_consec = 0
 
                 if self.is_insert_recording:
-                    self.insert_buffer.append(frame)
-                    self.insert_raw_buffer.append(raw_frame)
-                    self.insert_max_mrl_seen = max(self.insert_max_mrl_seen, mrl)
+                    _relative_warmup_completed = False
+                    if self.transport_use_9d_relative:
+                        # Store every physical frame first.  Training computes a
+                        # fixed taxel-wise median over the first B raw frames;
+                        # online inference must reproduce that exact baseline.
+                        self.insert_raw_buffer.append(raw_frame)
+                        self.insert_abs_buffer.append(abs_frame)
+                        _baseline_frames = int(
+                            self.insert_gru_ae_infer_cfg.get(
+                                "baseline_frames", 30))
+                        _relative_count = len(self.insert_raw_buffer)
+
+                        if _relative_count < _baseline_frames:
+                            # These placeholders are replaced retroactively as
+                            # soon as the fixed median becomes available.  No
+                            # GRU window is evaluated before frame 50.
+                            _transport_frame = [0.0] * 9
+                            self.insert_buffer.append(_transport_frame)
+                        elif _relative_count == _baseline_frames:
+                            _raw_warmup = np.asarray(
+                                self.insert_raw_buffer, dtype=np.float32)
+                            self._transport_9d_relative_baseline = np.median(
+                                _raw_warmup[:_baseline_frames].astype(
+                                    np.float64),
+                                axis=0)
+                            _warmup_features = compute_transport_9d_relative(
+                                _raw_warmup,
+                                baseline_frames=_baseline_frames,
+                                change_threshold=float(
+                                    self.insert_gru_ae_infer_cfg.get(
+                                        "change_threshold", 0.1)),
+                                change_sharpness=float(
+                                    self.insert_gru_ae_infer_cfg.get(
+                                        "change_sharpness", 10.0)),
+                            )
+                            self.insert_buffer[:] = _warmup_features.tolist()
+                            _transport_frame = self.insert_buffer[-1]
+                            _relative_warmup_completed = True
+                            self.get_logger().info(
+                                f"[NEW-9D-REL] stable-grasp baseline 확정: "
+                                f"frames={_baseline_frames}")
+                        else:
+                            _transport_frame = compute_transport_9d_from_baseline(
+                                np.asarray(raw_frame, dtype=np.float32).reshape(1, 48),
+                                self._transport_9d_relative_baseline,
+                                change_threshold=float(
+                                    self.insert_gru_ae_infer_cfg.get(
+                                        "change_threshold", 0.1)),
+                                change_sharpness=float(
+                                    self.insert_gru_ae_infer_cfg.get(
+                                        "change_sharpness", 10.0)),
+                            )[0].tolist()
+                            self.insert_buffer.append(_transport_frame)
+                    elif self.transport_use_11d_codex:
+                        _transport_frame = compute_transport_11d_delta(
+                            np.asarray(raw_frame, dtype=np.float32).reshape(1, 48),
+                            active_threshold=float(
+                                self.insert_gru_ae_infer_cfg.get(
+                                    "delta_active_thresh", 0.1)),
+                            active_sharpness=float(
+                                self.insert_gru_ae_infer_cfg.get(
+                                    "delta_active_sharpness", 10.0)),
+                        )[0].tolist()
+                    elif self.transport_use_11d:
+                        _transport_frame = frame_11d
+                    elif self.transport_use_10d:
+                        _transport_frame = frame_10d
+                    elif self.transport_use_8d:
+                        _transport_frame = frame_8d
+                    elif self.transport_use_9d:
+                        _transport_frame = frame_9d
+                    else:
+                        _transport_frame = frame
+                    if not self.transport_use_9d_relative:
+                        self.insert_buffer.append(_transport_frame)
+                        self.insert_raw_buffer.append(raw_frame)
+                        self.insert_abs_buffer.append(abs_frame)
+                    if _relative_warmup_completed:
+                        self.insert_max_mrl_seen = max(
+                            float(feature[0]) for feature in self.insert_buffer)
+                    else:
+                        self.insert_max_mrl_seen = max(
+                            self.insert_max_mrl_seen, float(_transport_frame[0]))
                     if self.run_mode == 'inference':
                         if self.use_tactile_api and self.insert_api_detector is not None:
-                            frame_arr = np.array(frame,     dtype=np.float32)
+                            frame_arr = np.array(_transport_frame, dtype=np.float32)
                             raw_arr   = np.array(raw_frame, dtype=np.float32)
                             self.insert_infer_frame_cnt += 1
                             res      = self.insert_api_detector.update(frame_arr, raw_frame=raw_arr)
@@ -2089,36 +2558,107 @@ class ControlTower(Node):
                                         )
                         else:
                             # ── 기존 경로: 채널 A는 별도 worker thread, 채널 B는 여기서 처리
-                            self.insert_realtime_buffer.append(frame)
+                            if (self.transport_use_9d_relative and
+                                    _relative_warmup_completed):
+                                self.insert_realtime_buffer.clear()
+                                self.insert_realtime_buffer.extend(
+                                    self.insert_buffer)
+                            else:
+                                self.insert_realtime_buffer.append(
+                                    _transport_frame)
                             self.insert_realtime_raw_buffer.append(raw_frame)
                             self.insert_infer_frame_cnt += 1
                             if (len(self.insert_realtime_buffer) >= 50 and
-                                    self.insert_infer_frame_cnt % self.inference_stride == 0):
+                                    self.insert_infer_frame_cnt %
+                                    self.insert_inference_stride == 0):
                                 self._insert_trigger.set()
-                            # 채널 B: 퍼프레임 MRL delta → 즉시 anomaly 확정 (50프레임 대기 없음)
-                            # 이송 초기 모션 아티팩트 방지용 워밍업 기간 적용
-                            # 최소 힘 게이트: max_norm이 너무 작으면 MRL이 불안정 → 체크 생략
-                            if (self.transport_channel_b is not None and
-                                    self.insert_infer_frame_cnt > self.transport_channel_b_warmup_needed and
-                                    self.max_norm > 0.3):
-                                frame_arr = np.array(frame, dtype=np.float32)
-                                delta_b, flag_b = self.transport_channel_b.update(frame_arr)
+                            # Channel B: per-frame DC-corrected contact loss detector.
+                            # Channel B uses DC-corrected 3-axis taxel force.
+                            # The empty-gripper reference removes the ~35k raw sensor offset;
+                            # the first transport frames then define the stable-grasp baseline.
+                            if self._sensor_zero_raw is None:
+                                flag_b = False
+                                self.transport_channel_b_consec = 0
+                                if not self._sensor_zero_warned:
+                                    self._sensor_zero_warned = True
+                                    self.get_logger().warn(
+                                        "[CH-B] 무부하 기준값이 없어 transport Channel B를 비활성화합니다.")
+                            else:
+                                scale_vecs = np.column_stack((
+                                    self.grng[0:16], self.grng[16:32], self.grng[32:48]
+                                ))
+                                scale_vecs = np.maximum(scale_vecs, 1.0)
+                                contact_vecs_b = (raw_sensor_vecs - self._sensor_zero_raw) / scale_vecs
+                                taxel_force_b = np.linalg.norm(contact_vecs_b, axis=1)
+
+                                contact_thr_b = self._sensor_contact_threshold
+                                sigmoid_arg = np.clip(
+                                    10.0 * (taxel_force_b - contact_thr_b) /
+                                    max(contact_thr_b, 1e-6), -60.0, 60.0)
+                                contact_b = float(np.sum(1.0 / (1.0 + np.exp(-sigmoid_arg))))
+                                top3_force_b = float(np.mean(np.partition(taxel_force_b, -3)[-3:]))
+                                peak_taxel_b = int(np.argmax(taxel_force_b))
+
+                                if self._transport_ch_b_contact_baseline is None:
+                                    self._transport_ch_b_warmup_contact.append(contact_b)
+                                    self._transport_ch_b_warmup_force.append(top3_force_b)
+                                    flag_b = False
+                                    contact_drop = 0.0
+                                    force_drop = 0.0
+                                    if (len(self._transport_ch_b_warmup_contact) >=
+                                            self.transport_channel_b_warmup_needed):
+                                        self._transport_ch_b_contact_baseline = float(np.median(
+                                            self._transport_ch_b_warmup_contact))
+                                        self._transport_ch_b_force_baseline = float(np.median(
+                                            self._transport_ch_b_warmup_force))
+                                        self.get_logger().info(
+                                            f"[CH-B] transport baseline 확정: "
+                                            f"contact={self._transport_ch_b_contact_baseline:.2f}, "
+                                            f"top3={self._transport_ch_b_force_baseline:.4f}")
+                                else:
+                                    base_contact = self._transport_ch_b_contact_baseline
+                                    base_force = self._transport_ch_b_force_baseline
+                                    contact_drop = (max(
+                                        0.0, (base_contact - contact_b) / base_contact)
+                                        if base_contact >= 1.0 else 0.0)
+                                    force_drop = (max(
+                                        0.0, (base_force - top3_force_b) / base_force)
+                                        if base_force >= contact_thr_b * 1.5 else 0.0)
+                                    flag_b = (
+                                        contact_drop > self.transport_ch_b_contact_drop_threshold or
+                                        force_drop > self.transport_ch_b_force_drop_threshold
+                                    )
+
+                                delta_b = max(contact_drop, force_drop)
+                                self.transport_delta_b_current = delta_b
+                                print(
+                                    f"[CH-B] cnt={self.insert_infer_frame_cnt} "
+                                    f"Ac={contact_b:.2f}(base={self._transport_ch_b_contact_baseline} "
+                                    f"drop={contact_drop:.1%}) "
+                                    f"Top3={top3_force_b:.4f}(base={self._transport_ch_b_force_baseline} "
+                                    f"drop={force_drop:.1%}) peak={peak_taxel_b} "
+                                    f"consec={self.transport_channel_b_consec} "
+                                    f"flag={'Y' if flag_b else 'n'}"
+                                )
                                 if flag_b:
                                     self.transport_channel_b_consec += 1
-                                    if (self.transport_channel_b_consec >=
+                                    severe_drop = max(contact_drop, force_drop) > 0.60
+                                    if (severe_drop or
+                                            self.transport_channel_b_consec >=
                                             self.transport_channel_b_consec_needed):
                                         with self._infer_lock:
                                             self.transport_channel_b_flag = True
                                             self.transport_delta_b_latest = delta_b
                                             if not self.insert_anomaly_ever_detected:
-                                                self.insert_anomaly_ever_detected = True  # 즉시 확정
+                                                self.insert_anomaly_ever_detected = True
                                                 self.transport_detect_channel = 'B'
                                                 self._transport_abort.set()
                                                 self.get_logger().warn(
                                                     "🚨 Slip Recorded! Will recover after motion.")
                                         self.get_logger().error(
-                                            f"[CH-B] Transport 낙하 즉시 감지! "
-                                            f"delta={delta_b:.4f} thr={self.insert_gru_ae_threshold_b:.4f}"
+                                            f"[CH-B] Transport 이상 감지! "
+                                            f"contact_drop={contact_drop:.1%} "
+                                            f"force_drop={force_drop:.1%}"
                                         )
                                 else:
                                     self.transport_channel_b_consec = 0
@@ -2239,7 +2779,7 @@ class ControlTower(Node):
         self._wait_future(result_future, timeout_sec=duration_sec)
         self.get_logger().info("[open_door] 완료")
 
-    def _floor_recovery_grasp(self) -> bool:
+    def _floor_recovery_grasp(self, attempt: int = 0) -> bool:
         """이송 중 낙하한 세탁물을 바닥에서 찾아 재파지. True=성공."""
         import copy
 
@@ -2268,26 +2808,38 @@ class ControlTower(Node):
             self.get_logger().warn("[RECOVERY] 세탁물 미감지 → 재파지 포기")
             return False
 
-        # Hover → Pre-Grasp → Push
-        hover_pose = copy.deepcopy(target)
-        hover_pose.pose.position.z = 0.0
+        # 시도 횟수만큼 z-offset -1cm 적용 (동일 파지점 반복 방지)
+        if attempt > 0:
+            z_offset = -0.01 * attempt
+            target.pose.position.z += z_offset
+            self.get_logger().warn(
+                f"[RECOVERY] z-offset {z_offset*100:.0f}cm 적용 → z={target.pose.position.z:.3f}"
+            )
 
+        # Pre-Grasp → Push (ba_init과 동일한 순서/ik_mode)
         pre_grasp_pose = copy.deepcopy(target)
         pre_grasp_pose.pose.position.z += 0.05
 
-        res = self.move_forward(hover_pose, fallback_to_ik=True, ik_mode=10)
-        if res not in ('success', 'stop'):
-            self.get_logger().warn(f"[RECOVERY] Hover 이동 실패: {res}")
+        pre_grasp_ok = False
+        for i in range(3):
+            res = self.move_forward(pre_grasp_pose, fallback_to_ik=True, ik_mode=10)
+            if res in ('success', 'stop'):
+                pre_grasp_ok = True
+                break
+            self.get_logger().warn(f"[RECOVERY] Pre-Grasp 실패 ({i+1}/3): {res}")
+        if not pre_grasp_ok:
+            self.get_logger().warn("[RECOVERY] Pre-Grasp 3회 실패 → 재파지 포기")
             return False
 
-        res = self.move_forward(pre_grasp_pose, fallback_to_ik=True, ik_mode=6)
-        if res not in ('success', 'stop'):
-            self.get_logger().warn(f"[RECOVERY] Pre-Grasp 이동 실패: {res}")
-            return False
-
-        res = self.move_forward(target, fallback_to_ik=True, ik_mode=6)
-        if res not in ('success', 'stop'):
-            self.get_logger().warn(f"[RECOVERY] Push 이동 실패: {res}")
+        push_ok = False
+        for i in range(3):
+            res = self.move_forward(target, ik_mode=11)
+            if res in ('success', 'stop'):
+                push_ok = True
+                break
+            self.get_logger().warn(f"[RECOVERY] Push 실패 ({i+1}/3): {res}")
+        if not push_ok:
+            self.get_logger().warn("[RECOVERY] Push 3회 실패 → 재파지 포기")
             return False
 
         self.close_gripper()
@@ -2596,7 +3148,7 @@ class ControlTower(Node):
             # So DEEP (Base) = DEEP (World) - 0.445
             # MIN_SAFE_Z_BASE = 0.155 - 0.445 = -0.290
             
-            MIN_SAFE_Z_BASE = -0.300
+            MIN_SAFE_Z_BASE = -0.100
             if pose.position.z < MIN_SAFE_Z_BASE:
                  self.get_logger().warn(f"Target Z ({pose.position.z:.3f}) too low! Clamping to {MIN_SAFE_Z_BASE} (Base Frame)")
                  pose.position.z = MIN_SAFE_Z_BASE
@@ -3398,6 +3950,9 @@ class ControlTower(Node):
         while rclpy.ok():
             _t_cycle = time.time()
 
+            _ba_consecutive_fails = 0
+            _MAX_SAME_FAILS = 2  # 동일 후보에서 N회 실패 시 다음 후보로 전환
+            _ba_z_offset_m = 0.0  # 후보 소진 시 z축 하강 누적 offset (m)
             while True:
                 self.open_gripper()
                 self.z_aligned = False
@@ -3408,19 +3963,54 @@ class ControlTower(Node):
                     time.sleep(0.2)
                 self._step_time("ba_init 이동", _t)
                 self.reset_sensor_data()
+                # Gripper is open and stationary here: capture the true DC offset
+                # before touching laundry. Channel B reuses this reference during
+                # grasp and transport.
+                self._capture_empty_gripper_reference()
                 import time
                 self.get_logger().info("Step 2: 잡기 시도 중...")
                 _t = time.time()
-                target_ba = self.target_get_ba(mode="basket")  # 감지
-                self._step_time("target_get_ba 비전 처리", _t)
-                if target_ba.pose.position.z == -99.0:
-                    self.get_logger().info("🛑 [Overcome] 빈 바구니 감지 (RGB Gate). overcome2 호출.")
-                    self.overcome2()
-                    break
-            
+                _ba_candidate_idx = _ba_consecutive_fails // _MAX_SAME_FAILS
+                if _ba_consecutive_fails == 0:
+                    # 첫 시도: 새로 감지 (캐시 갱신)
+                    target_ba = self.target_get_ba(mode="basket")
+                    self._step_time("target_get_ba 비전 처리", _t)
+                    if target_ba.pose.position.z == -99.0:
+                        self.get_logger().info("🛑 [Overcome] 빈 바구니 감지 (RGB Gate). overcome2 호출.")
+                        self.overcome2()
+                        break
+                else:
+                    # 재시도: 캐시된 N번째 후보 사용
+                    target_ba = self.target_get_ba(mode=f"basket:{_ba_candidate_idx}")
+                    self._step_time(f"target_get_ba 후보 #{_ba_candidate_idx}", _t)
+                    if target_ba.pose.position.z == -99.0:
+                        # 캐시 후보 소진 → z-offset 1cm 추가 후 재감지
+                        _ba_z_offset_m -= 0.01
+                        self.get_logger().warn(
+                            f"[BA-GRASP] 후보 #{_ba_candidate_idx} 없음 → 재감지 + z-offset {_ba_z_offset_m*100:.0f}cm 적용"
+                        )
+                        _ba_consecutive_fails = 0
+                        _ba_candidate_idx = 0
+                        target_ba = self.target_get_ba(mode="basket")
+                        if target_ba.pose.position.z == -99.0:
+                            self.get_logger().info("🛑 [Overcome] 빈 바구니 감지 (RGB Gate). overcome2 호출.")
+                            self.overcome2()
+                            break
+                if _ba_candidate_idx > 0:
+                    self.get_logger().warn(
+                        f"[BA-GRASP] 후보 #{_ba_candidate_idx} 사용 "
+                        f"(연속 실패 {_ba_consecutive_fails}회) "
+                        f"→ x={target_ba.pose.position.x:.3f} y={target_ba.pose.position.y:.3f}"
+                    )
+                if _ba_z_offset_m != 0.0:
+                    target_ba.pose.position.z += _ba_z_offset_m
+                    self.get_logger().warn(
+                        f"[BA-GRASP] z-offset {_ba_z_offset_m*100:.0f}cm 적용 → z={target_ba.pose.position.z:.3f}"
+                    )
+
                 # --- Three-Stage Approach: 1. Approach Hover 2. Pre-Grasp 3. Push ---
                 import copy
-                
+
                 # 1. Hover Pose (Safe Altitude above Target)
                 # Pre-Grasp Pose (+5cm above Target)
                 pre_grasp_pose = copy.deepcopy(target_ba)
@@ -3557,6 +4147,7 @@ class ControlTower(Node):
                 if not approach_success:
                     self.get_logger().warn("  >> Pre-Grasp 전부 실패 → 새 target 요청")
                     self._step_time("Pre-Grasp 접근 (실패)", _t_pregrasp)
+                    _ba_consecutive_fails += 1
                     continue
 
                 self._step_time("Pre-Grasp 접근 (성공)", _t_pregrasp)
@@ -3587,6 +4178,7 @@ class ControlTower(Node):
                 else:
                     self.get_logger().warn("forward 5회 실패 → 새 target")
                     self._step_time("Push 이동 (실패)", _t)
+                    _ba_consecutive_fails += 1
                     continue     # 다음 루프로
 
                 self._step_time("Push 이동 (성공)", _t)
@@ -3609,6 +4201,7 @@ class ControlTower(Node):
                     self.infer_latest_score           = None
                     self.infer_grasp_anomaly_detected = False
                     self.grasp_detect_channel        = 'none'
+                    self.grasp_max_mrl_seen          = 0.0
                     self.grasp_channel_b_flag        = False
                     self.grasp_channel_b_consec      = 0
                     self.grasp_delta_b_latest        = 0.0
@@ -3684,19 +4277,23 @@ class ControlTower(Node):
                     if held:
                         # 파지 성공 → Model 1 success 즉시 저장 후 이송 진행
                         self._save_grasp_data(label='success')
+                        _ba_consecutive_fails = 0
                         self.z_aligned = True
                         break
                     elif held is False:
                         # 파지 실패 → Model 1 failure 저장 후 재시도
                         self._save_grasp_data(label='failure')
+                        _ba_consecutive_fails += 1
                         while not self.open_gripper():
                             self.get_logger().warn("  >> 그리퍼 오픈 실패 → 재시도 중")
                     else:
                         # skip → rule-based fallback
                         if rule_success:
+                            _ba_consecutive_fails = 0
                             self.z_aligned = True
                             break
                         else:
+                            _ba_consecutive_fails += 1
                             while not self.open_gripper():
                                 self.get_logger().warn("  >> 그리퍼 오픈 실패 → 재시도 중")
 
@@ -3714,10 +4311,12 @@ class ControlTower(Node):
                             f"→ rule-based fallback (rule_success={rule_success})")
                         if rule_success:
                             self.get_logger().info("[INFERENCE] ✅ 파지 성공 판정 (rule-based fallback)")
+                            _ba_consecutive_fails = 0
                             self.z_aligned = True
                             break
                         else:
                             self.get_logger().warn("[INFERENCE] ❌ 파지 실패 판정 (rule-based fallback) → 재시도")
+                            _ba_consecutive_fails += 1
                             while not self.open_gripper():
                                 self.get_logger().warn("  >> 그리퍼 오픈 실패 → 재시도 중")
                             continue
@@ -3729,6 +4328,7 @@ class ControlTower(Node):
                         f"최종 score={score_str}")
                     if not anom_detected:
                         self.get_logger().info("[INFERENCE] ✅ 파지 성공 판정")
+                        _ba_consecutive_fails = 0
                         self.z_aligned = True
                         break
                     else:
@@ -3737,16 +4337,19 @@ class ControlTower(Node):
                                    'AB': 'Channel A + B (둘 다)'}.get(detect_ch, detect_ch)
                         self.get_logger().warn(
                             f"[INFERENCE] ❌ 파지 실패 판정 → 재시도  |  감지 채널: {ch_desc}  |  score_A={score_str}")
+                        _ba_consecutive_fails += 1
                         while not self.open_gripper():
                             self.get_logger().warn("  >> 그리퍼 오픈 실패 → 재시도 중")
 
                 else:
                     # normal 모드: 기존 rule-based 동작
                     if rule_success:
+                        _ba_consecutive_fails = 0
                         self.z_aligned = True
                         break
                     else:
                         self.get_logger().warn(f" 잡기 실패: Δθ={theta_diff:.1f}°, θ={current_theta:.1f}°, norm={self.norm:.3f})")
+                        _ba_consecutive_fails += 1
                         while not self.open_gripper():
                             self.get_logger().warn("  >> 그리퍼 오픈 실패 → 재시도 중")
 
@@ -3772,7 +4375,9 @@ class ControlTower(Node):
                 self.reset_sensor_data()
                 self.insert_buffer = []
                 self.insert_raw_buffer = []
+                self.insert_abs_buffer = []
                 self.insert_realtime_buffer.clear()
+                self.insert_realtime_raw_buffer.clear()
                 self.insert_max_mrl_seen              = 0.0
                 self.insert_infer_frame_cnt           = 0
                 self.insert_infer_consec_normal       = 0
@@ -3783,11 +4388,20 @@ class ControlTower(Node):
                 self.transport_channel_b_flag         = False
                 self.transport_channel_b_consec       = 0
                 self.transport_delta_b_latest         = 0.0
+                self.transport_delta_b_current        = 0.0
+                self._transport_ch_b_acontact_ema     = None
+                self._transport_ch_b_fmax_z_ema       = None
+                self._reset_transport_channel_b_state()
                 if self.transport_channel_b is not None:
                     self.transport_channel_b.reset()
                 if self.use_tactile_api and self.insert_api_detector is not None:
                     self.insert_api_detector.reset()
                 self.is_insert_recording = True
+                with self._lock:
+                    self.monitor_torque = False
+                    self.stop_requested = False
+                    self.stop_reason = ""
+                    self.torque_stop = False
                 self.get_logger().info("[DATA] 이송 구간 녹화 시작 (ba_init → open_gripper)")
 
             self._transport_abort.clear()
@@ -3810,8 +4424,8 @@ class ControlTower(Node):
             if abort_at_wm_init and self.run_mode == 'inference':
                 self.get_logger().warn("[INFERENCE] 낙하 감지 → 재파지 조건 확인")
                 time.sleep(0.5)  # MoveIt/JTC 완료 대기 (status 6 방지)
-                self._transport_abort.clear()  # _send_goal abort 체크 해제 후 그리퍼 명령
-                # 그리퍼 오픈 retry (arm 컨트롤러 상태 불안정 시 첫 시도 묻힐 수 있음)
+                self._transport_abort.clear()
+                # 그리퍼 오픈 retry
                 for _retry in range(3):
                     if self.open_gripper():
                         break
@@ -3820,42 +4434,91 @@ class ControlTower(Node):
 
                 j1_now = self.current_joint_state[0] if self.current_joint_state else 999.0
                 if j1_now <= 0.5:
-                    self.get_logger().warn(f"[RECOVERY] joint1={j1_now:.3f} ≤ 0.5 → 바닥 재파지 시도")
-                    recovered = self._floor_recovery_grasp()
+                    # 최대 3회 재파지 시도
+                    _MAX_RECOVERY = 3
+                    recovered = False
+                    for _attempt in range(_MAX_RECOVERY):
+                        self.get_logger().warn(
+                            f"[RECOVERY] 바닥 재파지 시도 ({_attempt+1}/{_MAX_RECOVERY})")
+                        recovered = self._floor_recovery_grasp(attempt=_attempt)
+                        if recovered:
+                            self.get_logger().info(
+                                f"[RECOVERY] 재파지 성공 (시도 {_attempt+1}회)")
+                            break
+                        self.get_logger().warn(
+                            f"[RECOVERY] 재파지 실패 ({_attempt+1}/{_MAX_RECOVERY})")
+
                     if recovered:
-                        self.get_logger().info("[RECOVERY] 재파지 성공 → 이송 재개")
+                        # anomaly detector 초기화 후 이송 재개
+                        self.get_logger().info("[RECOVERY] 재이송 시작 → anomaly detector 재활성")
+                        self.reset_sensor_data()
+                        self.insert_buffer = []
+                        self.insert_raw_buffer = []
+                        self.insert_abs_buffer = []
+                        self.insert_realtime_buffer.clear()
+                        self.insert_realtime_raw_buffer.clear()
+                        self.insert_max_mrl_seen          = 0.0
+                        self.insert_infer_frame_cnt       = 0
+                        self.insert_infer_consec_normal   = 0
+                        self.insert_infer_consec_anomaly  = 0
+                        self.insert_infer_latest_score    = None
+                        self.insert_anomaly_ever_detected = False
+                        self.transport_detect_channel     = 'none'
+                        self.transport_channel_b_flag     = False
+                        self.transport_channel_b_consec   = 0
+                        self.transport_delta_b_latest     = 0.0
+                        self.transport_delta_b_current    = 0.0
+                        self._transport_ch_b_acontact_ema = None
+                        self._transport_ch_b_fmax_z_ema   = None
+                        self._reset_transport_channel_b_state()
+                        if self.transport_channel_b is not None:
+                            self.transport_channel_b.reset()
+                        self.is_insert_recording = True
                         self._transport_abort.clear()
-                        while not self.goal(self.wm_init, 'keep'):  # 물체 파지 중 → 기본 속도
+
+                        # 재이송: wm_init
+                        while not self.goal(self.wm_init, 'keep'):
                             if self._transport_abort.is_set():
                                 break
                             self.get_logger().warn("  >> [RECOVERY] wm_init 이동 실패 → 재시도")
                             time.sleep(0.2)
+                        # 재이송: wm_end (중간 낙하 재감지 대응)
                         if not self._transport_abort.is_set():
-                            while not self.goal(self.wm_end, 'keep'):  # 물체 파지 중 → 기본 속도
+                            while not self.goal(self.wm_end, 'keep'):
                                 if self._transport_abort.is_set():
                                     break
                                 self.get_logger().warn("  >> [RECOVERY] wm_end 이동 실패 → 재시도")
                                 time.sleep(0.2)
-                        if not self._transport_abort.is_set():
+
+                        self.is_insert_recording = False
+
+                        if self._transport_abort.is_set():
+                            # 재이송 중 낙하 재감지 → 복구 포기하고 바구니로 복귀
+                            self.get_logger().warn(
+                                "[RECOVERY] 재이송 중 낙하 재감지 → 그리퍼 오픈 후 바구니로 복귀")
+                            self.open_gripper()
+                            while not self.goal(self.ba_init, 'keep', fast=True):
+                                self.get_logger().warn("  >> ba_init 복귀 실패 → 재시도 중")
+                                time.sleep(0.2)
+                        else:
                             self.open_gripper()
                             time.sleep(0.3)
-                        # 정상 경로와 동일하게 wm_init 경유 후 복귀
-                        self.get_logger().info("[RECOVERY] wm_init 경유 후 ba_init 복귀")
-                        while not self.goal(self.wm_init, 'keep', fast=True):  # 물체 없음 → 빠른 복귀
-                            self.get_logger().warn("  >> [RECOVERY] wm_init 복귀 실패 → 재시도")
-                            time.sleep(0.2)
+                            self.get_logger().info("[RECOVERY] 재이송 성공 → wm_init 경유 ba_init 복귀")
+                            while not self.goal(self.wm_init, 'keep', fast=True):
+                                self.get_logger().warn("  >> [RECOVERY] wm_init 복귀 실패 → 재시도")
+                                time.sleep(0.2)
                     else:
-                        self.get_logger().warn("[RECOVERY] 재파지 실패 → 바구니로 복귀")
-                        while not self.goal(self.ba_init, 'keep', fast=True):  # 물체 없음 → 빠른 복귀
+                        self.get_logger().warn(
+                            f"[RECOVERY] 재파지 {_MAX_RECOVERY}회 모두 실패 → 바구니로 복귀")
+                        while not self.goal(self.ba_init, 'keep', fast=True):
                             self.get_logger().warn("  >> ba_init 복귀 실패 → 재시도 중")
                             time.sleep(0.2)
                 else:
                     self.get_logger().warn(f"[RECOVERY] joint1={j1_now:.3f} > 0.5 → 재파지 생략, 바구니로 복귀")
-                    while not self.goal(self.ba_init, 'keep', fast=True):  # 물체 없음 → 빠른 복귀
+                    while not self.goal(self.ba_init, 'keep', fast=True):
                         self.get_logger().warn("  >> ba_init 복귀 실패 → 재시도 중")
                         time.sleep(0.2)
                 self._step_time("=== 낙하 복구 사이클 완료", _t_cycle)
-                # summary는 overcome2 종료 시(3742)에 모든 cycle 누적 후 한번에 출력
                 continue
 
             # wm_init 이후: abort 클리어 후 wm_end로 이동 (이상 감지 없음)
@@ -3891,6 +4554,10 @@ class ControlTower(Node):
                     f"(anomaly_ever={anomaly_ever}, consec={insert_consec}/{insert_needed}, "
                     f"latest_score={score_str})"
                 )
+                # Detector 판정을 ground truth로 재사용하지 않도록
+                # inference 데이터는 별도 폴더에 unknown으로만 저장한다.
+                self._save_insert_data(
+                    label='unknown', save_dir=self.insert_infer_save_dir)
                 if not insert_ok:
                     ch_desc = {'A': 'Channel A (GRU-AE)',
                                'B': 'Channel B (MRL delta)',
@@ -4006,16 +4673,48 @@ class ControlTower(Node):
 def main(args=None):
     parser = argparse.ArgumentParser(description='ControlTower 실행 모드 설정')
     parser.add_argument('--mode', type=str, default='normal',
-                        choices=['normal', 'collect', 'inference'],
-                        help='normal: rule-based | collect: 데이터 수집 | inference: GRU-AE 판단')
+                        choices=['normal', 'collect', 'inference',
+                                 'new_11d', 'new_9d_relative'],
+                        help=('normal: rule-based | collect: 데이터 수집 | '
+                              'inference: 기존 GRU-AE | '
+                              'new_11d: revised 11D first-frame | '
+                              'new_9d_relative: stable-baseline relative 9D'))
     parser.add_argument('--use_tactile_api', action='store_true',
                         help='inference 모드에서 tactile_anomaly.DualChannelDetector API 사용')
+    parser.add_argument(
+        '--threshold_a', type=float, default=None,
+        help='Codex Transport Channel A threshold runtime override')
+    parser.add_argument(
+        '--infer_stride', type=int, default=None,
+        help='Codex Transport inference stride runtime override')
+    parser.add_argument(
+        '--consec', type=int, default=None,
+        help='Codex Transport regular-threshold consecutive count runtime override')
     parsed, ros_args = parser.parse_known_args()
+
+    overrides = (parsed.threshold_a, parsed.infer_stride, parsed.consec)
+    if (any(value is not None for value in overrides) and
+            parsed.mode not in ('new_11d', 'new_9d_relative')):
+        parser.error(
+            '--threshold_a/--infer_stride/--consec는 Codex 실험 모드에서만 '
+            '사용할 수 있습니다.')
+    if parsed.threshold_a is not None and parsed.threshold_a <= 0:
+        parser.error('--threshold_a는 0보다 커야 합니다.')
+    if parsed.infer_stride is not None and parsed.infer_stride <= 0:
+        parser.error('--infer_stride는 0보다 커야 합니다.')
+    if parsed.consec is not None and parsed.consec <= 0:
+        parser.error('--consec는 0보다 커야 합니다.')
 
     rclpy.init(args=ros_args if ros_args else args)
 
     try:
-        node = ControlTower(run_mode=parsed.mode, use_tactile_api=parsed.use_tactile_api)
+        node = ControlTower(
+            run_mode=parsed.mode,
+            use_tactile_api=parsed.use_tactile_api,
+            threshold_a_override=parsed.threshold_a,
+            infer_stride_override=parsed.infer_stride,
+            consec_override=parsed.consec,
+        )
     except RuntimeError as e:
         print(f"노드 초기화 중 오류 발생: {e}")
         return
@@ -4050,4 +4749,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
