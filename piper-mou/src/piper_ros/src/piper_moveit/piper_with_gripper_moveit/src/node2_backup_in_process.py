@@ -370,6 +370,28 @@ def _analyze_mask(mask):
     cx, cy = int(xs.mean()), int(ys.mean())
     return (cx, cy), theta, int(area), dt_max
 
+def _analyze_mask_multi(mask, min_area=150, min_dt=3.0, max_centers=5):
+    """마스크에서 조건을 만족하는 모든 CC의 centroid 반환 (면적 내림차순).
+    반환: [(area, dt_max, cx, cy), ...]
+    """
+    num, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        mask.astype(np.uint8), connectivity=8
+    )
+    results = []
+    for lb in range(1, num):
+        area = int(stats[lb, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        cc = (labels == lb).astype(np.uint8)
+        dt_max = float(cv2.distanceTransform(cc, cv2.DIST_L2, 3).max())
+        if dt_max < min_dt:
+            continue
+        cx = int(round(centroids[lb, 0]))
+        cy = int(round(centroids[lb, 1]))
+        results.append((area, dt_max, cx, cy))
+    results.sort(key=lambda r: r[0], reverse=True)
+    return results[:max_centers]
+
 # ── failure_eh 전용: depth heuristic ─────────────────────────────────────────
 def _fill_holes(mask_255: np.ndarray) -> np.ndarray:
     inv = 255 - (mask_255 > 0).astype(np.uint8) * 255
@@ -748,27 +770,36 @@ class VisionEngine:
                     logits = self._basket_net(x.float())
 
                 mask  = _postprocess_mask_basket(logits, thr, (H, W))
-                center, theta, area, dt_max = _analyze_mask(mask)
+                candidates = _analyze_mask_multi(mask, min_area=vote_min_area, min_dt=vote_min_dt)
 
-                if center is None or area < vote_min_area or dt_max < vote_min_dt:
+                if not candidates:
                     continue
 
-                cx, cy = center
-                local  = depth[max(0,cy-2):cy+3, max(0,cx-2):cx+3]
-                val    = local[local > 0]
-                if val.size == 0:
+                # 3D 좌표 변환 (유효한 depth가 있는 후보만)
+                centers_3d = []
+                for area_c, dt_c, cx_c, cy_c in candidates:
+                    local = depth[max(0,cy_c-2):cy_c+3, max(0,cx_c-2):cx_c+3]
+                    val   = local[local > 0]
+                    if val.size == 0:
+                        continue
+                    z_m = float(np.median(val))
+                    X, Y, Z = _uvz_to_xyz(cx_c, cy_c, z_m, fx, fy, ppx, ppy)
+                    if Z < 0.55:
+                        Z += 0.05
+                    centers_3d.append([X, Y, Z])
+
+                if not centers_3d:
                     continue
 
-                z_m = float(np.median(val))
-                X, Y, Z = _uvz_to_xyz(cx, cy, z_m, fx, fy, ppx, ppy)
-                if Z < 0.55:
-                    Z += 0.05   # run_basket_backup.py 동일 보정
+                # theta: 가장 큰 CC 기준 (기존 동작 유지)
+                _, theta, _, _ = _analyze_mask(mask)
+                first_area, first_dt, first_cx, first_cy = candidates[0]
 
                 elapsed = _time.time() - t0
-                print(f"[INFER_TIMER] detect_basket: {elapsed:.2f}s")
+                print(f"[INFER_TIMER] detect_basket: {elapsed:.2f}s ({len(centers_3d)}개 후보)")
                 return {"success": True, "empty": False, "mode": "basket",
-                        "centers": [[X, Y, Z]], "pixel_center": [cx, cy],
-                        "theta": float(theta), "area": int(area), "dt": float(dt_max)}
+                        "centers": centers_3d, "pixel_center": [first_cx, first_cy],
+                        "theta": float(theta), "area": int(first_area), "dt": float(first_dt)}
 
     # ── failure_eh 감지 ───────────────────────────────────────────────────────
     def detect_failure_eh(self, vote_k=10, vote_min_area=150, vote_min_dt=3.0,
@@ -822,9 +853,9 @@ class VisionEngine:
 
                 # ── RGB gate: 빈 세탁기 빠른 감지 ─────────────────────────────
                 g = self._rgb_gate.decide(color_bgr, hi_thr=0.60, lo_thr=0.55)
+                print(f"[failure_eh] rgb-gate {g['decision']} cloth_p={g['cloth_prob']:.2f} ema={g['ema_prob']:.2f}")
                 if g["decision"] == "EMPTY":
                     elapsed = _time.time() - t0
-                    print(f"[failure_eh] rgb-gate EMPTY p={g['cloth_prob']:.2f} ema={g['ema_prob']:.2f}")
                     print(f"[INFER_TIMER] detect_failure_eh: {elapsed:.2f}s (rgb_gate_empty)")
                     return {"success": False, "reason": "rgb_gate_empty", "object_count": 0}
 
@@ -903,6 +934,7 @@ class TargetPoseServer(Node):
         self.device = device       
 
         self._vision = VisionEngine(device=device, log_fn=self.get_logger().info, show=show)
+        self._basket_centers_cache: list = []  # basket 감지 결과 후보 캐시
 
         self._action_server = ActionServer(
             self, TargetPose, 'target_pose', self.execute_callback)
@@ -921,9 +953,31 @@ class TargetPoseServer(Node):
         try:
             if mode in ("basket", "basket_eh"):
                 result_dict = self._vision.detect_basket()
+                self._basket_centers_cache = result_dict.get("centers") or []
+                self.get_logger().info(f"[basket] 후보 {len(self._basket_centers_cache)}개 캐시")
+            elif mode.startswith("basket:"):
+                # 캐시된 N번째 후보 반환 (재감지 없음)
+                try:
+                    idx = int(mode.split(":", 1)[1])
+                except (ValueError, IndexError):
+                    self.get_logger().warn(f"[basket:N] 잘못된 인덱스: {mode}")
+                    goal_handle.abort()
+                    return TargetPose.Result(success=False)
+                if idx < len(self._basket_centers_cache):
+                    center = self._basket_centers_cache[idx]
+                    self.get_logger().info(
+                        f"[basket:{idx}] 캐시 후보 반환: {center} "
+                        f"(전체 {len(self._basket_centers_cache)}개)"
+                    )
+                    result_dict = {"success": True, "centers": [center], "area": 99999}
+                else:
+                    self.get_logger().warn(
+                        f"[basket:{idx}] 후보 없음 (캐시={len(self._basket_centers_cache)}개)"
+                    )
+                    result_dict = {"success": False, "centers": []}
             elif mode in ("failure_eh", "failure_eh_strict"):
                 strict = (mode == "failure_eh_strict")
-                vote_k = 3 if strict else 1  # empty check=단발, 정밀 좌표=3프레임 median
+                vote_k = 3  # failure_eh/strict 모두 3프레임 median
                 result_dict = self._vision.detect_failure_eh(strict=strict, vote_k=vote_k)
             elif mode == "wm":
                 result_dict = self._vision.detect_wm()

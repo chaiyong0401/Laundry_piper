@@ -45,9 +45,11 @@ class FramewiseDeltaDetector:
 
     @staticmethod
     def _compute_mrl(frame: np.ndarray) -> float:
-        if frame.shape[0] == 6:
+        """Rule 1 miss-guard용: pure MRL."""
+        if frame.shape[0] in (6, 9, 10, 11):
             return float(frame[0])
-        # raw 48D: x0,y0,z0, x1,y1,z1, ..., x15,y15,z15
+        if frame.shape[0] == 8:
+            return float(min(frame[7] / 5.0, 1.0))
         vecs = frame[:48].reshape(16, 3)
         norms = np.linalg.norm(vecs, axis=1)
         valid_mask = norms > 0.1
@@ -55,15 +57,34 @@ class FramewiseDeltaDetector:
             unit_vecs = vecs[valid_mask] / norms[valid_mask, np.newaxis]
             mean_unit = np.mean(unit_vecs, axis=0)
             return float(np.linalg.norm(mean_unit))
-        else:
-            return 0.0
+        return 0.0
+
+    @staticmethod
+    def _compute_channel_b_signal(frame: np.ndarray) -> float:
+        """Channel B 감지 신호: MRL×(Acontact/16) for 10D/11D, MRL for 6D/9D."""
+        if frame.shape[0] in (10, 11):
+            return float(frame[0]) * float(frame[8]) / 16.0
+        if frame.shape[0] in (6, 9):
+            return float(frame[0])
+        if frame.shape[0] == 8:
+            return float(min(frame[7] / 5.0, 1.0))
+        vecs = frame[:48].reshape(16, 3)
+        norms = np.linalg.norm(vecs, axis=1)
+        valid_mask = norms > 0.1
+        if valid_mask.sum() >= 2:
+            unit_vecs = vecs[valid_mask] / norms[valid_mask, np.newaxis]
+            mean_unit = np.mean(unit_vecs, axis=0)
+            mrl = float(np.linalg.norm(mean_unit))
+            acontact = float(np.sum(1.0 / (1.0 + np.exp(-10.0 * (vecs[:, 2] - 0.1)))))
+            return mrl * acontact / 16.0
+        return 0.0
 
     def update(self, frame: np.ndarray) -> tuple[float, bool]:
         """
         frame: (D,) raw feature
         Returns: (delta, is_anomaly)
         """
-        mrl = self._compute_mrl(frame)
+        mrl = self._compute_channel_b_signal(frame)
 
         if self._prev_mrl is None:
             self._prev_mrl = mrl
@@ -295,7 +316,7 @@ def calibrate_threshold_b(
     """
     deltas = []
     for seq in success_sequences:
-        mrl_series = np.array([FramewiseDeltaDetector._compute_mrl(seq[t]) for t in range(len(seq))])
+        mrl_series = np.array([FramewiseDeltaDetector._compute_channel_b_signal(seq[t]) for t in range(len(seq))])
         for t in range(max(smooth_window, warmup), len(mrl_series)):
             ref = float(mrl_series[t - smooth_window:t].mean())
             deltas.append(abs(float(mrl_series[t]) - ref))
