@@ -1,0 +1,530 @@
+{
+  "config": {
+    "model": "transport",
+    "data_dir": "/home/dyros/mcy_ws/transport_new",
+    "output_dir": "/home/dyros/mcy_ws/transport_new/codex_model_9d_relative",
+    "use_raw": false,
+    "use_9d": false,
+    "use_8d": false,
+    "use_10d": false,
+    "use_11d": false,
+    "use_9d_relative": true,
+    "use_11d_codex": false,
+    "windowed": true,
+    "seq_len": 50,
+    "win_stride": 10,
+    "infer_stride": 10,
+    "split": "chronological",
+    "val_ratio": 0.15,
+    "test_ratio": 0.15,
+    "seed": 42,
+    "hidden_dim": 32,
+    "num_layers": 1,
+    "dropout": 0.0,
+    "epochs": 1000,
+    "batch_size": 32,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "patience": 20,
+    "threshold_pct": 96.0,
+    "threshold_scope": "window",
+    "relative": "none",
+    "weight_alpha": 0.0,
+    "hybrid": false,
+    "acontact_thresh": 0.1,
+    "delta_active_thresh": 0.1,
+    "delta_active_sharpness": 10.0,
+    "baseline_frames": 30,
+    "change_threshold": 0.1,
+    "change_sharpness": 10.0,
+    "mrl_thresh": 0.3,
+    "cutoff_multiplier": 2.2,
+    "consec": 2,
+    "eval": true,
+    "dry_run": false
+  },
+  "feature_names": [
+    "delta_mrl",
+    "delta_fx",
+    "delta_fy",
+    "delta_fz",
+    "delta_mx",
+    "delta_my",
+    "delta_mz",
+    "changed_taxel_count",
+    "peak_delta_norm"
+  ],
+  "threshold": 4.840718498229981,
+  "validation_score_mean": 0.6618793280903281,
+  "validation_score_max": 5.669577598571777,
+  "metrics": {
+    "test_success": {
+      "episodes": 12,
+      "detected": 1,
+      "detection_rate": 0.08333333333333333,
+      "first_reason": {
+        "rule3": 1
+      },
+      "details": [
+        {
+          "file": "transport_20260527_211324_438880_success_raw.npy",
+          "frames": 164,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.046317208558321,
+          "mean_score": 0.01851089933188632
+        },
+        {
+          "file": "transport_20260720_190730_572653_success_raw.npy",
+          "frames": 241,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.1640680879354477,
+          "mean_score": 0.04639698918908834
+        },
+        {
+          "file": "transport_20260720_190814_425402_success_raw.npy",
+          "frames": 368,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.2766275107860565,
+          "mean_score": 0.126653362007346
+        },
+        {
+          "file": "transport_20260720_190856_723659_success_raw.npy",
+          "frames": 328,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.6426689624786377,
+          "mean_score": 0.13435596487085735
+        },
+        {
+          "file": "transport_20260720_191128_681575_success_raw.npy",
+          "frames": 217,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.054232291877269745,
+          "mean_score": 0.02022598692051628
+        },
+        {
+          "file": "transport_20260720_192422_831592_success_raw.npy",
+          "frames": 233,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 2.17376971244812,
+          "mean_score": 1.0937059188359661
+        },
+        {
+          "file": "transport_20260720_192522_788299_success_raw.npy",
+          "frames": 201,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.04185058921575546,
+          "mean_score": 0.020908498583594337
+        },
+        {
+          "file": "transport_20260720_192607_870824_success_raw.npy",
+          "frames": 355,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.6249038577079773,
+          "mean_score": 0.07394310231170347
+        },
+        {
+          "file": "transport_20260720_192812_804496_success_raw.npy",
+          "frames": 256,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.21714970469474792,
+          "mean_score": 0.03886841299633185
+        },
+        {
+          "file": "transport_20260720_192856_616160_success_raw.npy",
+          "frames": 574,
+          "detected": true,
+          "detection_frame": 499,
+          "reason": "rule3",
+          "max_score": 11.425591468811035,
+          "mean_score": 2.14724652897918
+        },
+        {
+          "file": "transport_20260720_192939_522859_success_raw.npy",
+          "frames": 225,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.08321628719568253,
+          "mean_score": 0.03136488458969527
+        },
+        {
+          "file": "transport_20260720_193111_311034_success_raw.npy",
+          "frames": 219,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.07048109918832779,
+          "mean_score": 0.019216597135014394
+        }
+      ]
+    },
+    "failure": {
+      "episodes": 25,
+      "detected": 1,
+      "detection_rate": 0.04,
+      "first_reason": {
+        "rule3": 1
+      },
+      "details": [
+        {
+          "file": "transport_20260522_145733_815583_failure_raw.npy",
+          "frames": 333,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.4018884301185608,
+          "mean_score": 0.096609176232897
+        },
+        {
+          "file": "transport_20260522_151350_619817_failure_raw.npy",
+          "frames": 418,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.5638173818588257,
+          "mean_score": 0.11012305319309235
+        },
+        {
+          "file": "transport_20260522_152149_347926_failure_raw.npy",
+          "frames": 223,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 1.645784616470337,
+          "mean_score": 1.0509201486905415
+        },
+        {
+          "file": "transport_20260522_152559_730544_failure_raw.npy",
+          "frames": 140,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.1254688948392868,
+          "mean_score": 0.04159220522269606
+        },
+        {
+          "file": "transport_20260527_192404_220567_failure_raw.npy",
+          "frames": 627,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 2.405367136001587,
+          "mean_score": 1.1647237986326218
+        },
+        {
+          "file": "transport_20260527_192927_529563_failure_raw.npy",
+          "frames": 378,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.4636256992816925,
+          "mean_score": 0.1116305235208887
+        },
+        {
+          "file": "transport_20260527_193101_293530_failure_raw.npy",
+          "frames": 141,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.14077962934970856,
+          "mean_score": 0.03424356225878
+        },
+        {
+          "file": "transport_20260527_194538_034669_failure_raw.npy",
+          "frames": 166,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.06534194201231003,
+          "mean_score": 0.051694381361206375
+        },
+        {
+          "file": "transport_20260527_194749_330327_failure_raw.npy",
+          "frames": 169,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.17362859845161438,
+          "mean_score": 0.0823538654173414
+        },
+        {
+          "file": "transport_20260527_194853_901374_failure_raw.npy",
+          "frames": 248,
+          "detected": true,
+          "detection_frame": 179,
+          "reason": "rule3",
+          "max_score": 5.812586307525635,
+          "mean_score": 1.6465167589485645
+        },
+        {
+          "file": "transport_20260527_200703_310267_failure_raw.npy",
+          "frames": 300,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.18198585510253906,
+          "mean_score": 0.03412594614872852
+        },
+        {
+          "file": "transport_20260527_200857_554100_failure_raw.npy",
+          "frames": 430,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 1.0559673309326172,
+          "mean_score": 0.1464973334223032
+        },
+        {
+          "file": "transport_20260527_200957_081843_failure_raw.npy",
+          "frames": 215,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.1668330281972885,
+          "mean_score": 0.06880963527980972
+        },
+        {
+          "file": "transport_20260527_202136_344088_failure_raw.npy",
+          "frames": 200,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.0999983474612236,
+          "mean_score": 0.03431655408348888
+        },
+        {
+          "file": "transport_20260527_202238_311722_failure_raw.npy",
+          "frames": 227,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.3026800751686096,
+          "mean_score": 0.09775066323992279
+        },
+        {
+          "file": "transport_20260527_204718_403455_failure_raw.npy",
+          "frames": 495,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 4.826254367828369,
+          "mean_score": 1.236350175903903
+        },
+        {
+          "file": "transport_20260527_210506_892322_failure_raw.npy",
+          "frames": 287,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.7049106955528259,
+          "mean_score": 0.10475346888415515
+        },
+        {
+          "file": "transport_20260527_210604_679439_failure_raw.npy",
+          "frames": 128,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.4015076458454132,
+          "mean_score": 0.11210524186026305
+        },
+        {
+          "file": "transport_20260527_211214_914393_failure_raw.npy",
+          "frames": 206,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.12507416307926178,
+          "mean_score": 0.042179999174550176
+        },
+        {
+          "file": "transport_20260716_154835_984908_failure_raw.npy",
+          "frames": 150,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.36982011795043945,
+          "mean_score": 0.12728818167339673
+        },
+        {
+          "file": "transport_20260716_154922_299586_failure_raw.npy",
+          "frames": 206,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.4320462644100189,
+          "mean_score": 0.10579523484921083
+        },
+        {
+          "file": "transport_20260720_190633_532068_failure_raw.npy",
+          "frames": 156,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.3434242904186249,
+          "mean_score": 0.20642460950396277
+        },
+        {
+          "file": "transport_20260720_192648_291460_failure_raw.npy",
+          "frames": 173,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.3156284987926483,
+          "mean_score": 0.12179780235657325
+        },
+        {
+          "file": "transport_20260720_192729_746317_failure_raw.npy",
+          "frames": 268,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.8959994316101074,
+          "mean_score": 0.33054468645290896
+        },
+        {
+          "file": "transport_20260720_193024_441326_failure_raw.npy",
+          "frames": 226,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.12295298278331757,
+          "mean_score": 0.06757304093076123
+        }
+      ]
+    },
+    "window_roc_auc": 0.5971347565914971,
+    "window_average_precision": 0.6916239318093382
+  },
+  "manifest": {
+    "train_success": [
+      "transport_20260522_145906_156789_success_raw.npy",
+      "transport_20260522_150102_862970_success_raw.npy",
+      "transport_20260522_150513_443229_success_raw.npy",
+      "transport_20260522_150648_403136_success_raw.npy",
+      "transport_20260522_150830_026273_success_raw.npy",
+      "transport_20260522_151027_196228_success_raw.npy",
+      "transport_20260522_151147_219312_success_raw.npy",
+      "transport_20260522_151506_606427_success_raw.npy",
+      "transport_20260522_152006_802481_success_raw.npy",
+      "transport_20260522_152313_466992_success_raw.npy",
+      "transport_20260522_152723_776174_success_raw.npy",
+      "transport_20260522_152846_671927_success_raw.npy",
+      "transport_20260522_153018_315274_success_raw.npy",
+      "transport_20260522_153323_238402_success_raw.npy",
+      "transport_20260522_153421_553867_success_raw.npy",
+      "transport_20260522_153534_309487_success_raw.npy",
+      "transport_20260527_191922_527760_success_raw.npy",
+      "transport_20260527_192058_399943_success_raw.npy",
+      "transport_20260527_192203_963637_success_raw.npy",
+      "transport_20260527_192505_607675_success_raw.npy",
+      "transport_20260527_192619_747485_success_raw.npy",
+      "transport_20260527_192827_289150_success_raw.npy",
+      "transport_20260527_193159_063682_success_raw.npy",
+      "transport_20260527_193412_965395_success_raw.npy",
+      "transport_20260527_193604_352786_success_raw.npy",
+      "transport_20260527_194440_782071_success_raw.npy",
+      "transport_20260527_194643_077114_success_raw.npy",
+      "transport_20260527_194955_608570_success_raw.npy",
+      "transport_20260527_195056_376387_success_raw.npy",
+      "transport_20260527_195205_842851_success_raw.npy",
+      "transport_20260527_195322_093965_success_raw.npy",
+      "transport_20260527_200212_380232_success_raw.npy",
+      "transport_20260527_200316_096936_success_raw.npy",
+      "transport_20260527_200431_947437_success_raw.npy",
+      "transport_20260527_200556_023760_success_raw.npy",
+      "transport_20260527_201124_762378_success_raw.npy",
+      "transport_20260527_201229_830071_success_raw.npy",
+      "transport_20260527_201448_709092_success_raw.npy",
+      "transport_20260527_201653_195882_success_raw.npy",
+      "transport_20260527_201745_232934_success_raw.npy",
+      "transport_20260527_201915_878987_success_raw.npy",
+      "transport_20260527_202039_039628_success_raw.npy",
+      "transport_20260527_202358_439045_success_raw.npy",
+      "transport_20260527_202526_898620_success_raw.npy",
+      "transport_20260527_202625_521320_success_raw.npy",
+      "transport_20260527_202801_827261_success_raw.npy",
+      "transport_20260527_203022_396771_success_raw.npy",
+      "transport_20260527_203146_630985_success_raw.npy",
+      "transport_20260527_203251_949920_success_raw.npy",
+      "transport_20260527_203440_276512_success_raw.npy",
+      "transport_20260527_203548_174104_success_raw.npy",
+      "transport_20260527_203934_212463_success_raw.npy",
+      "transport_20260527_204100_243875_success_raw.npy",
+      "transport_20260527_204209_048503_success_raw.npy"
+    ],
+    "validation_success": [
+      "transport_20260527_204316_303338_success_raw.npy",
+      "transport_20260527_204411_425604_success_raw.npy",
+      "transport_20260527_204616_992636_success_raw.npy",
+      "transport_20260527_204834_134822_success_raw.npy",
+      "transport_20260527_205027_726184_success_raw.npy",
+      "transport_20260527_205951_309649_success_raw.npy",
+      "transport_20260527_210058_351976_success_raw.npy",
+      "transport_20260527_210223_325429_success_raw.npy",
+      "transport_20260527_210359_909128_success_raw.npy",
+      "transport_20260527_210757_423349_success_raw.npy",
+      "transport_20260527_211001_107372_success_raw.npy",
+      "transport_20260527_211117_902692_success_raw.npy"
+    ],
+    "test_success": [
+      "transport_20260527_211324_438880_success_raw.npy",
+      "transport_20260720_190730_572653_success_raw.npy",
+      "transport_20260720_190814_425402_success_raw.npy",
+      "transport_20260720_190856_723659_success_raw.npy",
+      "transport_20260720_191128_681575_success_raw.npy",
+      "transport_20260720_192422_831592_success_raw.npy",
+      "transport_20260720_192522_788299_success_raw.npy",
+      "transport_20260720_192607_870824_success_raw.npy",
+      "transport_20260720_192812_804496_success_raw.npy",
+      "transport_20260720_192856_616160_success_raw.npy",
+      "transport_20260720_192939_522859_success_raw.npy",
+      "transport_20260720_193111_311034_success_raw.npy"
+    ],
+    "test_failure": [
+      "transport_20260522_145733_815583_failure_raw.npy",
+      "transport_20260522_151350_619817_failure_raw.npy",
+      "transport_20260522_152149_347926_failure_raw.npy",
+      "transport_20260522_152559_730544_failure_raw.npy",
+      "transport_20260527_192404_220567_failure_raw.npy",
+      "transport_20260527_192927_529563_failure_raw.npy",
+      "transport_20260527_193101_293530_failure_raw.npy",
+      "transport_20260527_194538_034669_failure_raw.npy",
+      "transport_20260527_194749_330327_failure_raw.npy",
+      "transport_20260527_194853_901374_failure_raw.npy",
+      "transport_20260527_200703_310267_failure_raw.npy",
+      "transport_20260527_200857_554100_failure_raw.npy",
+      "transport_20260527_200957_081843_failure_raw.npy",
+      "transport_20260527_202136_344088_failure_raw.npy",
+      "transport_20260527_202238_311722_failure_raw.npy",
+      "transport_20260527_204718_403455_failure_raw.npy",
+      "transport_20260527_210506_892322_failure_raw.npy",
+      "transport_20260527_210604_679439_failure_raw.npy",
+      "transport_20260527_211214_914393_failure_raw.npy",
+      "transport_20260716_154835_984908_failure_raw.npy",
+      "transport_20260716_154922_299586_failure_raw.npy",
+      "transport_20260720_190633_532068_failure_raw.npy",
+      "transport_20260720_192648_291460_failure_raw.npy",
+      "transport_20260720_192729_746317_failure_raw.npy",
+      "transport_20260720_193024_441326_failure_raw.npy"
+    ]
+  }
+}

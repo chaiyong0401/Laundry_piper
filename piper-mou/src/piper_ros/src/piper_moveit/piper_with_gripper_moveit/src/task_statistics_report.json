@@ -1,0 +1,79 @@
+{
+  "assumption": "independent_groups",
+  "methods": [
+    {
+      "name": "ACT",
+      "successes": 24,
+      "total": 50,
+      "rate": 0.48,
+      "clopper_pearson_95ci": [
+        0.3366050916034599,
+        0.6258480549209058
+      ]
+    },
+    {
+      "name": "Ours single-shot",
+      "successes": 39,
+      "total": 50,
+      "rate": 0.78,
+      "clopper_pearson_95ci": [
+        0.6403881114342107,
+        0.8847341739621514
+      ]
+    },
+    {
+      "name": "Ours recoverable",
+      "successes": 46,
+      "total": 50,
+      "rate": 0.92,
+      "clopper_pearson_95ci": [
+        0.8076572164040372,
+        0.9777720363450703
+      ]
+    }
+  ],
+  "comparisons": [
+    {
+      "comparison": "Ours recoverable vs Ours single-shot",
+      "risk_difference": 0.14,
+      "risk_difference_95ci": [
+        -0.0024632114438053188,
+        0.28100111033722874
+      ],
+      "risk_ratio": 1.1794871794871795,
+      "odds_ratio": 3.2435897435897436,
+      "fisher_exact_two_sided_p": 0.0905180045792175
+    },
+    {
+      "comparison": "Ours single-shot vs ACT",
+      "risk_difference": 0.30000000000000004,
+      "risk_difference_95ci": [
+        0.11098368821076929,
+        0.4611848958577629
+      ],
+      "risk_ratio": 1.6250000000000002,
+      "odds_ratio": 3.840909090909091,
+      "fisher_exact_two_sided_p": 0.003458380624361931
+    },
+    {
+      "comparison": "Ours recoverable vs ACT",
+      "risk_difference": 0.44000000000000006,
+      "risk_difference_95ci": [
+        0.2669680312271153,
+        0.5806378798515668
+      ],
+      "risk_ratio": 1.9166666666666667,
+      "odds_ratio": 12.458333333333334,
+      "fisher_exact_two_sided_p": 2.0578841441364336e-06
+    }
+  ],
+  "sample_size_planning": {
+    "target_rates": [
+      0.78,
+      0.92
+    ],
+    "two_sided_alpha": 0.05,
+    "power": 0.8,
+    "approx_required_per_group": 101
+  }
+}

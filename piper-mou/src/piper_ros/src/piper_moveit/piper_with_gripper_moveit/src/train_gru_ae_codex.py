@@ -52,8 +52,10 @@ from train_gru_ae import (  # noqa: E402
     compute_11d_from_raw,
 )
 from transport_features import (  # noqa: E402
+    CONTACT_MRL_9D_NAMES,
     TRANSPORT_9D_RELATIVE_NAMES,
     TRANSPORT_11D_CODEX_NAMES,
+    compute_contact_mrl_9d,
     compute_transport_9d_relative,
     compute_transport_11d_delta,
 )
@@ -91,6 +93,9 @@ def parse_args() -> argparse.Namespace:
     feature_group = parser.add_mutually_exclusive_group()
     feature_group.add_argument("--use_raw", action="store_true")
     feature_group.add_argument("--use_9d", action="store_true")
+    feature_group.add_argument(
+        "--use_c9d_unified", action="store_true",
+        help="Shared C8D+MRL 9D representation for grasp and transport")
     feature_group.add_argument("--use_8d", action="store_true")
     feature_group.add_argument("--use_10d", action="store_true")
     feature_group.add_argument("--use_11d", action="store_true")
@@ -146,6 +151,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--change_sharpness", type=float, default=10.0,
                         help="Relative C9D changed-taxel sigmoid sharpness")
     parser.add_argument("--mrl_thresh", type=float, default=0.3)
+    parser.add_argument(
+        "--disable_mrl_guard", action="store_true",
+        help="Evaluate Channel A as a pure reconstruction detector")
     parser.add_argument("--cutoff_multiplier", type=float, default=2.2)
     parser.add_argument("--consec", type=int, default=2,
                         help="Regular-threshold consecutive inference count")
@@ -180,6 +188,8 @@ def set_seed(seed: int) -> None:
 
 
 def feature_suffix(args: argparse.Namespace) -> str:
+    if args.use_c9d_unified:
+        return "_c9d_unified"
     if args.use_9d_relative:
         return "_9d_relative"
     if args.use_11d_codex:
@@ -198,6 +208,12 @@ def feature_suffix(args: argparse.Namespace) -> str:
 
 
 def raw_feature_builder(args: argparse.Namespace) -> Callable[[np.ndarray], np.ndarray]:
+    if args.use_c9d_unified:
+        return lambda raw: compute_contact_mrl_9d(
+            raw,
+            active_threshold=args.acontact_thresh,
+            active_sharpness=args.delta_active_sharpness,
+        )
     if args.use_9d_relative:
         return lambda raw: compute_transport_9d_relative(
             raw,
@@ -226,7 +242,8 @@ def raw_feature_builder(args: argparse.Namespace) -> Callable[[np.ndarray], np.n
 
 def load_episodes(data_dir: Path, prefix: str, label: str,
                   args: argparse.Namespace) -> list[Episode]:
-    uses_raw_file = any((args.use_raw, args.use_9d, args.use_8d,
+    uses_raw_file = any((args.use_raw, args.use_9d, args.use_c9d_unified,
+                         args.use_8d,
                          args.use_10d, args.use_11d, args.use_11d_codex,
                          args.use_9d_relative))
     if uses_raw_file:
@@ -602,6 +619,7 @@ def main() -> None:
         "weight_alpha": args.weight_alpha,
         "use_raw": args.use_raw,
         "use_9d": args.use_9d,
+        "use_c9d_unified": args.use_c9d_unified,
         "use_8d": args.use_8d,
         "use_10d": args.use_10d,
         "use_11d": args.use_11d,
@@ -617,8 +635,10 @@ def main() -> None:
         "hybrid": args.hybrid,
         "n_rel_dims": n_rel_dims,
         "mrl_thresh": args.mrl_thresh,
-        "mrl_guard_enabled": not args.use_9d_relative,
+        "mrl_guard_enabled": (
+            not args.disable_mrl_guard and not args.use_9d_relative),
         "cutoff_multiplier": args.cutoff_multiplier,
+        "consec": args.consec,
         "train_window_stride": args.win_stride,
         "inference_stride": args.infer_stride,
         "threshold_pct": args.threshold_pct,
@@ -631,7 +651,9 @@ def main() -> None:
 
     # Relative C9D contains change-vector MRL, not absolute contact MRL, so it
     # must not drive the "never grasped" miss guard.
-    has_mrl = not (args.use_raw or args.use_8d or args.use_9d_relative)
+    has_mrl = (
+        not args.disable_mrl_guard
+        and not (args.use_raw or args.use_8d or args.use_9d_relative))
     metrics, score_groups = evaluate_episodes(
         model,
         {"test_success": test_eps, "failure": failure},
@@ -655,7 +677,9 @@ def main() -> None:
         "test_success": [os.path.basename(ep.path) for ep in test_eps],
         "test_failure": [os.path.basename(ep.path) for ep in failure],
     }
-    if args.use_9d_relative:
+    if args.use_c9d_unified:
+        feature_names = list(CONTACT_MRL_9D_NAMES)
+    elif args.use_9d_relative:
         feature_names = list(TRANSPORT_9D_RELATIVE_NAMES)
     elif args.use_11d_codex:
         feature_names = list(TRANSPORT_11D_CODEX_NAMES)

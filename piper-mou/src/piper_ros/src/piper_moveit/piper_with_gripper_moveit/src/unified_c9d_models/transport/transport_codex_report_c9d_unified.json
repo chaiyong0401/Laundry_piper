@@ -1,0 +1,533 @@
+{
+  "config": {
+    "model": "transport",
+    "data_dir": "/home/dyros/mcy_ws/transport_new",
+    "output_dir": "/home/dyros/mcy_ws/piper-mou/src/piper_ros/src/piper_moveit/piper_with_gripper_moveit/src/unified_c9d_models/transport",
+    "use_raw": false,
+    "use_9d": false,
+    "use_c9d_unified": true,
+    "use_8d": false,
+    "use_10d": false,
+    "use_11d": false,
+    "use_9d_relative": false,
+    "use_11d_codex": false,
+    "windowed": true,
+    "seq_len": 50,
+    "win_stride": 10,
+    "infer_stride": 10,
+    "split": "chronological",
+    "val_ratio": 0.15,
+    "test_ratio": 0.15,
+    "seed": 42,
+    "hidden_dim": 32,
+    "num_layers": 1,
+    "dropout": 0.0,
+    "epochs": 400,
+    "batch_size": 32,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "patience": 20,
+    "threshold_pct": 95.0,
+    "threshold_scope": "episode_max",
+    "relative": "first_frame",
+    "weight_alpha": 0.0,
+    "hybrid": false,
+    "acontact_thresh": 0.1,
+    "delta_active_thresh": 0.1,
+    "delta_active_sharpness": 10.0,
+    "baseline_frames": 30,
+    "change_threshold": 0.1,
+    "change_sharpness": 10.0,
+    "mrl_thresh": 0.3,
+    "disable_mrl_guard": true,
+    "cutoff_multiplier": 2.2,
+    "consec": 2,
+    "eval": true,
+    "dry_run": false
+  },
+  "feature_names": [
+    "mrl",
+    "fx",
+    "fy",
+    "fz",
+    "mx",
+    "my",
+    "mz",
+    "active_contact",
+    "peak_force"
+  ],
+  "threshold": 0.26935250833630553,
+  "validation_score_mean": 0.021376238761564033,
+  "validation_score_max": 0.32138147950172424,
+  "metrics": {
+    "test_success": {
+      "episodes": 12,
+      "detected": 1,
+      "detection_rate": 0.08333333333333333,
+      "first_reason": {
+        "rule3": 1
+      },
+      "details": [
+        {
+          "file": "transport_20260527_211324_438880_success_raw.npy",
+          "frames": 164,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.08520810306072235,
+          "mean_score": 0.046891558663143464
+        },
+        {
+          "file": "transport_20260720_190730_572653_success_raw.npy",
+          "frames": 241,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.044462718069553375,
+          "mean_score": 0.008310852764407173
+        },
+        {
+          "file": "transport_20260720_190814_425402_success_raw.npy",
+          "frames": 368,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.01489541307091713,
+          "mean_score": 0.006527318859298248
+        },
+        {
+          "file": "transport_20260720_190856_723659_success_raw.npy",
+          "frames": 328,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.043000683188438416,
+          "mean_score": 0.015190755532655333
+        },
+        {
+          "file": "transport_20260720_191128_681575_success_raw.npy",
+          "frames": 217,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.029978537932038307,
+          "mean_score": 0.007026481038123807
+        },
+        {
+          "file": "transport_20260720_192422_831592_success_raw.npy",
+          "frames": 233,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.106767937541008,
+          "mean_score": 0.0377473184887908
+        },
+        {
+          "file": "transport_20260720_192522_788299_success_raw.npy",
+          "frames": 201,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.043415989726781845,
+          "mean_score": 0.010094244164065458
+        },
+        {
+          "file": "transport_20260720_192607_870824_success_raw.npy",
+          "frames": 355,
+          "detected": true,
+          "detection_frame": 349,
+          "reason": "rule3",
+          "max_score": 0.5655056834220886,
+          "mean_score": 0.03580754828609286
+        },
+        {
+          "file": "transport_20260720_192812_804496_success_raw.npy",
+          "frames": 256,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.024870075285434723,
+          "mean_score": 0.006172078301287478
+        },
+        {
+          "file": "transport_20260720_192856_616160_success_raw.npy",
+          "frames": 574,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.0360986664891243,
+          "mean_score": 0.01270205980904822
+        },
+        {
+          "file": "transport_20260720_192939_522859_success_raw.npy",
+          "frames": 225,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.05202651023864746,
+          "mean_score": 0.009979850560840633
+        },
+        {
+          "file": "transport_20260720_193111_311034_success_raw.npy",
+          "frames": 219,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.09235688298940659,
+          "mean_score": 0.018609148679602453
+        }
+      ]
+    },
+    "failure": {
+      "episodes": 25,
+      "detected": 7,
+      "detection_rate": 0.28,
+      "first_reason": {
+        "rule2": 5,
+        "rule3": 2
+      },
+      "details": [
+        {
+          "file": "transport_20260522_145733_815583_failure_raw.npy",
+          "frames": 333,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.14051935076713562,
+          "mean_score": 0.010753030649884122
+        },
+        {
+          "file": "transport_20260522_151350_619817_failure_raw.npy",
+          "frames": 418,
+          "detected": true,
+          "detection_frame": 399,
+          "reason": "rule2",
+          "max_score": 0.8260341882705688,
+          "mean_score": 0.06279150016505171
+        },
+        {
+          "file": "transport_20260522_152149_347926_failure_raw.npy",
+          "frames": 223,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.21728168427944183,
+          "mean_score": 0.07162836095085368
+        },
+        {
+          "file": "transport_20260522_152559_730544_failure_raw.npy",
+          "frames": 140,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.040386371314525604,
+          "mean_score": 0.011096839007223025
+        },
+        {
+          "file": "transport_20260527_192404_220567_failure_raw.npy",
+          "frames": 627,
+          "detected": true,
+          "detection_frame": 619,
+          "reason": "rule3",
+          "max_score": 0.4999762773513794,
+          "mean_score": 0.048116796840672736
+        },
+        {
+          "file": "transport_20260527_192927_529563_failure_raw.npy",
+          "frames": 378,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.12803325057029724,
+          "mean_score": 0.022934984429880526
+        },
+        {
+          "file": "transport_20260527_193101_293530_failure_raw.npy",
+          "frames": 141,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.046882595866918564,
+          "mean_score": 0.01057121900958009
+        },
+        {
+          "file": "transport_20260527_194538_034669_failure_raw.npy",
+          "frames": 166,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.10191550105810165,
+          "mean_score": 0.03131760579223434
+        },
+        {
+          "file": "transport_20260527_194749_330327_failure_raw.npy",
+          "frames": 169,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.07440593838691711,
+          "mean_score": 0.026404423910814028
+        },
+        {
+          "file": "transport_20260527_194853_901374_failure_raw.npy",
+          "frames": 248,
+          "detected": true,
+          "detection_frame": 169,
+          "reason": "rule2",
+          "max_score": 4.082107067108154,
+          "mean_score": 0.6821544461883604
+        },
+        {
+          "file": "transport_20260527_200703_310267_failure_raw.npy",
+          "frames": 300,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.17232036590576172,
+          "mean_score": 0.02940699940742119
+        },
+        {
+          "file": "transport_20260527_200857_554100_failure_raw.npy",
+          "frames": 430,
+          "detected": true,
+          "detection_frame": 229,
+          "reason": "rule2",
+          "max_score": 0.9854862689971924,
+          "mean_score": 0.10232218967389482
+        },
+        {
+          "file": "transport_20260527_200957_081843_failure_raw.npy",
+          "frames": 215,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.043913308531045914,
+          "mean_score": 0.014075684378279702
+        },
+        {
+          "file": "transport_20260527_202136_344088_failure_raw.npy",
+          "frames": 200,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.022104835137724876,
+          "mean_score": 0.008406574721448123
+        },
+        {
+          "file": "transport_20260527_202238_311722_failure_raw.npy",
+          "frames": 227,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.056658051908016205,
+          "mean_score": 0.019021513968861353
+        },
+        {
+          "file": "transport_20260527_204718_403455_failure_raw.npy",
+          "frames": 495,
+          "detected": true,
+          "detection_frame": 449,
+          "reason": "rule2",
+          "max_score": 2.2750697135925293,
+          "mean_score": 0.2144456757594728
+        },
+        {
+          "file": "transport_20260527_210506_892322_failure_raw.npy",
+          "frames": 287,
+          "detected": true,
+          "detection_frame": 269,
+          "reason": "rule2",
+          "max_score": 0.6324881315231323,
+          "mean_score": 0.07633950193606627
+        },
+        {
+          "file": "transport_20260527_210604_679439_failure_raw.npy",
+          "frames": 128,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.07655218988656998,
+          "mean_score": 0.016844480916915927
+        },
+        {
+          "file": "transport_20260527_211214_914393_failure_raw.npy",
+          "frames": 206,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.04536633566021919,
+          "mean_score": 0.01144626313180197
+        },
+        {
+          "file": "transport_20260716_154835_984908_failure_raw.npy",
+          "frames": 150,
+          "detected": true,
+          "detection_frame": 69,
+          "reason": "rule3",
+          "max_score": 0.31712889671325684,
+          "mean_score": 0.1238903656009246
+        },
+        {
+          "file": "transport_20260716_154922_299586_failure_raw.npy",
+          "frames": 206,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.11036388576030731,
+          "mean_score": 0.06432751673855819
+        },
+        {
+          "file": "transport_20260720_190633_532068_failure_raw.npy",
+          "frames": 156,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.13974730670452118,
+          "mean_score": 0.04291855421086604
+        },
+        {
+          "file": "transport_20260720_192648_291460_failure_raw.npy",
+          "frames": 173,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.18315613269805908,
+          "mean_score": 0.07159792785890974
+        },
+        {
+          "file": "transport_20260720_192729_746317_failure_raw.npy",
+          "frames": 268,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.1508672833442688,
+          "mean_score": 0.0354550095454959
+        },
+        {
+          "file": "transport_20260720_193024_441326_failure_raw.npy",
+          "frames": 226,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.030976565554738045,
+          "mean_score": 0.013837652719101041
+        }
+      ]
+    },
+    "window_roc_auc": 0.5470093286994695,
+    "window_average_precision": 0.742592494776245
+  },
+  "manifest": {
+    "train_success": [
+      "transport_20260522_145906_156789_success_raw.npy",
+      "transport_20260522_150102_862970_success_raw.npy",
+      "transport_20260522_150513_443229_success_raw.npy",
+      "transport_20260522_150648_403136_success_raw.npy",
+      "transport_20260522_150830_026273_success_raw.npy",
+      "transport_20260522_151027_196228_success_raw.npy",
+      "transport_20260522_151147_219312_success_raw.npy",
+      "transport_20260522_151506_606427_success_raw.npy",
+      "transport_20260522_152006_802481_success_raw.npy",
+      "transport_20260522_152313_466992_success_raw.npy",
+      "transport_20260522_152723_776174_success_raw.npy",
+      "transport_20260522_152846_671927_success_raw.npy",
+      "transport_20260522_153018_315274_success_raw.npy",
+      "transport_20260522_153323_238402_success_raw.npy",
+      "transport_20260522_153421_553867_success_raw.npy",
+      "transport_20260522_153534_309487_success_raw.npy",
+      "transport_20260527_191922_527760_success_raw.npy",
+      "transport_20260527_192058_399943_success_raw.npy",
+      "transport_20260527_192203_963637_success_raw.npy",
+      "transport_20260527_192505_607675_success_raw.npy",
+      "transport_20260527_192619_747485_success_raw.npy",
+      "transport_20260527_192827_289150_success_raw.npy",
+      "transport_20260527_193159_063682_success_raw.npy",
+      "transport_20260527_193412_965395_success_raw.npy",
+      "transport_20260527_193604_352786_success_raw.npy",
+      "transport_20260527_194440_782071_success_raw.npy",
+      "transport_20260527_194643_077114_success_raw.npy",
+      "transport_20260527_194955_608570_success_raw.npy",
+      "transport_20260527_195056_376387_success_raw.npy",
+      "transport_20260527_195205_842851_success_raw.npy",
+      "transport_20260527_195322_093965_success_raw.npy",
+      "transport_20260527_200212_380232_success_raw.npy",
+      "transport_20260527_200316_096936_success_raw.npy",
+      "transport_20260527_200431_947437_success_raw.npy",
+      "transport_20260527_200556_023760_success_raw.npy",
+      "transport_20260527_201124_762378_success_raw.npy",
+      "transport_20260527_201229_830071_success_raw.npy",
+      "transport_20260527_201448_709092_success_raw.npy",
+      "transport_20260527_201653_195882_success_raw.npy",
+      "transport_20260527_201745_232934_success_raw.npy",
+      "transport_20260527_201915_878987_success_raw.npy",
+      "transport_20260527_202039_039628_success_raw.npy",
+      "transport_20260527_202358_439045_success_raw.npy",
+      "transport_20260527_202526_898620_success_raw.npy",
+      "transport_20260527_202625_521320_success_raw.npy",
+      "transport_20260527_202801_827261_success_raw.npy",
+      "transport_20260527_203022_396771_success_raw.npy",
+      "transport_20260527_203146_630985_success_raw.npy",
+      "transport_20260527_203251_949920_success_raw.npy",
+      "transport_20260527_203440_276512_success_raw.npy",
+      "transport_20260527_203548_174104_success_raw.npy",
+      "transport_20260527_203934_212463_success_raw.npy",
+      "transport_20260527_204100_243875_success_raw.npy",
+      "transport_20260527_204209_048503_success_raw.npy"
+    ],
+    "validation_success": [
+      "transport_20260527_204316_303338_success_raw.npy",
+      "transport_20260527_204411_425604_success_raw.npy",
+      "transport_20260527_204616_992636_success_raw.npy",
+      "transport_20260527_204834_134822_success_raw.npy",
+      "transport_20260527_205027_726184_success_raw.npy",
+      "transport_20260527_205951_309649_success_raw.npy",
+      "transport_20260527_210058_351976_success_raw.npy",
+      "transport_20260527_210223_325429_success_raw.npy",
+      "transport_20260527_210359_909128_success_raw.npy",
+      "transport_20260527_210757_423349_success_raw.npy",
+      "transport_20260527_211001_107372_success_raw.npy",
+      "transport_20260527_211117_902692_success_raw.npy"
+    ],
+    "test_success": [
+      "transport_20260527_211324_438880_success_raw.npy",
+      "transport_20260720_190730_572653_success_raw.npy",
+      "transport_20260720_190814_425402_success_raw.npy",
+      "transport_20260720_190856_723659_success_raw.npy",
+      "transport_20260720_191128_681575_success_raw.npy",
+      "transport_20260720_192422_831592_success_raw.npy",
+      "transport_20260720_192522_788299_success_raw.npy",
+      "transport_20260720_192607_870824_success_raw.npy",
+      "transport_20260720_192812_804496_success_raw.npy",
+      "transport_20260720_192856_616160_success_raw.npy",
+      "transport_20260720_192939_522859_success_raw.npy",
+      "transport_20260720_193111_311034_success_raw.npy"
+    ],
+    "test_failure": [
+      "transport_20260522_145733_815583_failure_raw.npy",
+      "transport_20260522_151350_619817_failure_raw.npy",
+      "transport_20260522_152149_347926_failure_raw.npy",
+      "transport_20260522_152559_730544_failure_raw.npy",
+      "transport_20260527_192404_220567_failure_raw.npy",
+      "transport_20260527_192927_529563_failure_raw.npy",
+      "transport_20260527_193101_293530_failure_raw.npy",
+      "transport_20260527_194538_034669_failure_raw.npy",
+      "transport_20260527_194749_330327_failure_raw.npy",
+      "transport_20260527_194853_901374_failure_raw.npy",
+      "transport_20260527_200703_310267_failure_raw.npy",
+      "transport_20260527_200857_554100_failure_raw.npy",
+      "transport_20260527_200957_081843_failure_raw.npy",
+      "transport_20260527_202136_344088_failure_raw.npy",
+      "transport_20260527_202238_311722_failure_raw.npy",
+      "transport_20260527_204718_403455_failure_raw.npy",
+      "transport_20260527_210506_892322_failure_raw.npy",
+      "transport_20260527_210604_679439_failure_raw.npy",
+      "transport_20260527_211214_914393_failure_raw.npy",
+      "transport_20260716_154835_984908_failure_raw.npy",
+      "transport_20260716_154922_299586_failure_raw.npy",
+      "transport_20260720_190633_532068_failure_raw.npy",
+      "transport_20260720_192648_291460_failure_raw.npy",
+      "transport_20260720_192729_746317_failure_raw.npy",
+      "transport_20260720_193024_441326_failure_raw.npy"
+    ]
+  }
+}

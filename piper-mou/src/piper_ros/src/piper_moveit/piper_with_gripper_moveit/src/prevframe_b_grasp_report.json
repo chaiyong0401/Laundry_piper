@@ -1,0 +1,204 @@
+{
+  "phase": "grasp",
+  "config": {
+    "phase": "grasp",
+    "data_dir": "/home/dyros/mcy_ws/grasp_05",
+    "reference_frames": 3,
+    "consec": 3,
+    "warmup": 30,
+    "threshold_pct": 95.0,
+    "val_ratio": 0.15,
+    "test_ratio": 0.15,
+    "event_log_dir": null,
+    "output": "prevframe_b_grasp_report.json"
+  },
+  "threshold": 19.67808607137415,
+  "scale": [
+    0.0017983263731002808,
+    0.027660468864440915,
+    0.020016919004917144,
+    0.016826502442359923,
+    0.010470677983760833,
+    0.014630688500404358,
+    0.03593438293039799,
+    0.02779712621361673,
+    0.0069317307472229
+  ],
+  "split": {
+    "train_success": 35,
+    "validation_success": 8,
+    "test_success": 8,
+    "failure": 15
+  },
+  "historical_episode_eval": {
+    "test_success_false_positive": 0,
+    "test_success_total": 8,
+    "failure_detected": 5,
+    "failure_total": 15,
+    "test_success_rows": [
+      {
+        "file": "grasp_20260507_134141_310733_success_raw.npy",
+        "frames": 170,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 21.486636178058628
+      },
+      {
+        "file": "grasp_20260507_134303_407498_success_raw.npy",
+        "frames": 154,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 9.608277298475224
+      },
+      {
+        "file": "grasp_20260507_134647_841701_success_raw.npy",
+        "frames": 154,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 23.65996299034791
+      },
+      {
+        "file": "grasp_20260507_134807_169534_success_raw.npy",
+        "frames": 188,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 15.689739749778552
+      },
+      {
+        "file": "grasp_20260507_135155_385184_success_raw.npy",
+        "frames": 193,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 9.881511316508606
+      },
+      {
+        "file": "grasp_20260507_135340_681743_success_raw.npy",
+        "frames": 151,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 16.52988414350837
+      },
+      {
+        "file": "grasp_20260507_135506_822246_success_raw.npy",
+        "frames": 205,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 24.18873629179372
+      },
+      {
+        "file": "grasp_20260507_140233_973800_success_raw.npy",
+        "frames": 360,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 33.875780782722174
+      }
+    ],
+    "failure_rows": [
+      {
+        "file": "grasp_20260504_153722_487634_failure_raw.npy",
+        "frames": 149,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 11.268865438077343
+      },
+      {
+        "file": "grasp_20260504_154302_904662_failure_raw.npy",
+        "frames": 140,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 10.591992782946413
+      },
+      {
+        "file": "grasp_20260504_154335_805430_failure_raw.npy",
+        "frames": 275,
+        "detected": true,
+        "trigger_frame": 235,
+        "max_score": 401.6416891401602
+      },
+      {
+        "file": "grasp_20260504_154705_985805_failure_raw.npy",
+        "frames": 188,
+        "detected": true,
+        "trigger_frame": 165,
+        "max_score": 186.01418859675258
+      },
+      {
+        "file": "grasp_20260504_154744_622715_failure_raw.npy",
+        "frames": 219,
+        "detected": true,
+        "trigger_frame": 184,
+        "max_score": 219.8815090029175
+      },
+      {
+        "file": "grasp_20260504_154834_156252_failure_raw.npy",
+        "frames": 338,
+        "detected": true,
+        "trigger_frame": 101,
+        "max_score": 27.749570433896242
+      },
+      {
+        "file": "grasp_20260504_154931_178161_failure_raw.npy",
+        "frames": 263,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 15.942921171816952
+      },
+      {
+        "file": "grasp_20260504_155328_022049_failure_raw.npy",
+        "frames": 209,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 11.550917635895608
+      },
+      {
+        "file": "grasp_20260507_104817_406623_failure_raw.npy",
+        "frames": 267,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 14.022066085807745
+      },
+      {
+        "file": "grasp_20260507_105133_073893_failure_raw.npy",
+        "frames": 237,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 11.019862853536706
+      },
+      {
+        "file": "grasp_20260507_105500_991859_failure_raw.npy",
+        "frames": 209,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 19.670683617910118
+      },
+      {
+        "file": "grasp_20260507_105547_122589_failure_raw.npy",
+        "frames": 286,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 26.966745118216107
+      },
+      {
+        "file": "grasp_20260507_130316_204246_failure_raw.npy",
+        "frames": 205,
+        "detected": true,
+        "trigger_frame": 113,
+        "max_score": 232.02307115910133
+      },
+      {
+        "file": "grasp_20260507_135830_607777_failure_raw.npy",
+        "frames": 155,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 16.884016444792476
+      },
+      {
+        "file": "grasp_20260507_140357_118575_failure_raw.npy",
+        "frames": 207,
+        "detected": false,
+        "trigger_frame": null,
+        "max_score": 16.419174642859403
+      }
+    ]
+  }
+}

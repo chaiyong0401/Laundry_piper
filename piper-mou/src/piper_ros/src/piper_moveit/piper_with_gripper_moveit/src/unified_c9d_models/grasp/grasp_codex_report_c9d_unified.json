@@ -1,0 +1,367 @@
+{
+  "config": {
+    "model": "grasp",
+    "data_dir": "/home/dyros/mcy_ws/grasp_05",
+    "output_dir": "/home/dyros/mcy_ws/piper-mou/src/piper_ros/src/piper_moveit/piper_with_gripper_moveit/src/unified_c9d_models/grasp",
+    "use_raw": false,
+    "use_9d": false,
+    "use_c9d_unified": true,
+    "use_8d": false,
+    "use_10d": false,
+    "use_11d": false,
+    "use_9d_relative": false,
+    "use_11d_codex": false,
+    "windowed": true,
+    "seq_len": 50,
+    "win_stride": 10,
+    "infer_stride": 10,
+    "split": "chronological",
+    "val_ratio": 0.15,
+    "test_ratio": 0.15,
+    "seed": 42,
+    "hidden_dim": 32,
+    "num_layers": 1,
+    "dropout": 0.0,
+    "epochs": 400,
+    "batch_size": 32,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "patience": 20,
+    "threshold_pct": 95.0,
+    "threshold_scope": "episode_max",
+    "relative": "first_frame",
+    "weight_alpha": 0.0,
+    "hybrid": false,
+    "acontact_thresh": 0.1,
+    "delta_active_thresh": 0.1,
+    "delta_active_sharpness": 10.0,
+    "baseline_frames": 30,
+    "change_threshold": 0.1,
+    "change_sharpness": 10.0,
+    "mrl_thresh": 0.3,
+    "disable_mrl_guard": true,
+    "cutoff_multiplier": 2.2,
+    "consec": 2,
+    "eval": true,
+    "dry_run": false
+  },
+  "feature_names": [
+    "mrl",
+    "fx",
+    "fy",
+    "fz",
+    "mx",
+    "my",
+    "mz",
+    "active_contact",
+    "peak_force"
+  ],
+  "threshold": 0.2664180397987365,
+  "validation_score_mean": 0.02161212322877845,
+  "validation_score_max": 0.2883477807044983,
+  "metrics": {
+    "test_success": {
+      "episodes": 8,
+      "detected": 0,
+      "detection_rate": 0.0,
+      "first_reason": {},
+      "details": [
+        {
+          "file": "grasp_20260507_134141_310733_success_raw.npy",
+          "frames": 170,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.09349241852760315,
+          "mean_score": 0.013605715861418642
+        },
+        {
+          "file": "grasp_20260507_134303_407498_success_raw.npy",
+          "frames": 154,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.06624767929315567,
+          "mean_score": 0.011170113123212517
+        },
+        {
+          "file": "grasp_20260507_134647_841701_success_raw.npy",
+          "frames": 154,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.12469615042209625,
+          "mean_score": 0.017886040155479514
+        },
+        {
+          "file": "grasp_20260507_134807_169534_success_raw.npy",
+          "frames": 188,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.08834000676870346,
+          "mean_score": 0.014862752509153714
+        },
+        {
+          "file": "grasp_20260507_135155_385184_success_raw.npy",
+          "frames": 193,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.07722456008195877,
+          "mean_score": 0.01147146482738511
+        },
+        {
+          "file": "grasp_20260507_135340_681743_success_raw.npy",
+          "frames": 151,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.08723047375679016,
+          "mean_score": 0.015258802471428433
+        },
+        {
+          "file": "grasp_20260507_135506_822246_success_raw.npy",
+          "frames": 205,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.20091262459754944,
+          "mean_score": 0.019274840337857313
+        },
+        {
+          "file": "grasp_20260507_140233_973800_success_raw.npy",
+          "frames": 360,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.1620877981185913,
+          "mean_score": 0.009978375318951294
+        }
+      ]
+    },
+    "failure": {
+      "episodes": 15,
+      "detected": 4,
+      "detection_rate": 0.26666666666666666,
+      "first_reason": {
+        "rule2": 4
+      },
+      "details": [
+        {
+          "file": "grasp_20260504_153722_487634_failure_raw.npy",
+          "frames": 149,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.10125449299812317,
+          "mean_score": 0.015109354158630595
+        },
+        {
+          "file": "grasp_20260504_154302_904662_failure_raw.npy",
+          "frames": 140,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.09323973953723907,
+          "mean_score": 0.021724843853735364
+        },
+        {
+          "file": "grasp_20260504_154335_805430_failure_raw.npy",
+          "frames": 275,
+          "detected": true,
+          "detection_frame": 239,
+          "reason": "rule2",
+          "max_score": 4.353316783905029,
+          "mean_score": 0.6029871432616821
+        },
+        {
+          "file": "grasp_20260504_154705_985805_failure_raw.npy",
+          "frames": 188,
+          "detected": true,
+          "detection_frame": 169,
+          "reason": "rule2",
+          "max_score": 1.4972267150878906,
+          "mean_score": 0.22158249510851288
+        },
+        {
+          "file": "grasp_20260504_154744_622715_failure_raw.npy",
+          "frames": 219,
+          "detected": true,
+          "detection_frame": 189,
+          "reason": "rule2",
+          "max_score": 3.0846168994903564,
+          "mean_score": 0.3758463656036731
+        },
+        {
+          "file": "grasp_20260504_154834_156252_failure_raw.npy",
+          "frames": 338,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.3099232017993927,
+          "mean_score": 0.0536386760068126
+        },
+        {
+          "file": "grasp_20260504_154931_178161_failure_raw.npy",
+          "frames": 263,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.1529020369052887,
+          "mean_score": 0.014613710472820623
+        },
+        {
+          "file": "grasp_20260504_155328_022049_failure_raw.npy",
+          "frames": 209,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.0871250331401825,
+          "mean_score": 0.012719979487883393
+        },
+        {
+          "file": "grasp_20260507_104817_406623_failure_raw.npy",
+          "frames": 267,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.26414862275123596,
+          "mean_score": 0.018009062599792906
+        },
+        {
+          "file": "grasp_20260507_105133_073893_failure_raw.npy",
+          "frames": 237,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.13643035292625427,
+          "mean_score": 0.010789620544528589
+        },
+        {
+          "file": "grasp_20260507_105500_991859_failure_raw.npy",
+          "frames": 209,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.15532565116882324,
+          "mean_score": 0.016990540575534396
+        },
+        {
+          "file": "grasp_20260507_105547_122589_failure_raw.npy",
+          "frames": 286,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.07568071037530899,
+          "mean_score": 0.018332532612172752
+        },
+        {
+          "file": "grasp_20260507_130316_204246_failure_raw.npy",
+          "frames": 205,
+          "detected": true,
+          "detection_frame": 49,
+          "reason": "rule2",
+          "max_score": 3.2322263717651367,
+          "mean_score": 0.6779494005213564
+        },
+        {
+          "file": "grasp_20260507_135830_607777_failure_raw.npy",
+          "frames": 155,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.1486101746559143,
+          "mean_score": 0.024419404481622307
+        },
+        {
+          "file": "grasp_20260507_140357_118575_failure_raw.npy",
+          "frames": 207,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.09403502196073532,
+          "mean_score": 0.020995812279579695
+        }
+      ]
+    },
+    "window_roc_auc": 0.6574321214910263,
+    "window_average_precision": 0.8029582828605384
+  },
+  "manifest": {
+    "train_success": [
+      "grasp_20260504_152957_487532_success_raw.npy",
+      "grasp_20260504_153117_032589_success_raw.npy",
+      "grasp_20260504_153319_640148_success_raw.npy",
+      "grasp_20260504_153513_146743_success_raw.npy",
+      "grasp_20260504_153624_109965_success_raw.npy",
+      "grasp_20260504_153827_774826_success_raw.npy",
+      "grasp_20260504_154152_207644_success_raw.npy",
+      "grasp_20260504_154428_807279_success_raw.npy",
+      "grasp_20260504_154536_350802_success_raw.npy",
+      "grasp_20260504_155119_357249_success_raw.npy",
+      "grasp_20260504_155432_080745_success_raw.npy",
+      "grasp_20260504_155618_326296_success_raw.npy",
+      "grasp_20260504_155900_977227_success_raw.npy",
+      "grasp_20260504_160029_358711_success_raw.npy",
+      "grasp_20260504_160144_933432_success_raw.npy",
+      "grasp_20260507_104937_266227_success_raw.npy",
+      "grasp_20260507_105314_137277_success_raw.npy",
+      "grasp_20260507_105646_080714_success_raw.npy",
+      "grasp_20260507_105832_679755_success_raw.npy",
+      "grasp_20260507_110033_327653_success_raw.npy",
+      "grasp_20260507_110222_480891_success_raw.npy",
+      "grasp_20260507_110357_042439_success_raw.npy",
+      "grasp_20260507_110537_663771_success_raw.npy",
+      "grasp_20260507_110729_914543_success_raw.npy",
+      "grasp_20260507_110939_296687_success_raw.npy",
+      "grasp_20260507_111129_314010_success_raw.npy",
+      "grasp_20260507_111325_943275_success_raw.npy",
+      "grasp_20260507_111502_389311_success_raw.npy",
+      "grasp_20260507_111703_017609_success_raw.npy",
+      "grasp_20260507_111828_279754_success_raw.npy",
+      "grasp_20260507_111953_961677_success_raw.npy",
+      "grasp_20260507_112301_549548_success_raw.npy",
+      "grasp_20260507_112451_530766_success_raw.npy",
+      "grasp_20260507_112616_366342_success_raw.npy",
+      "grasp_20260507_112958_283167_success_raw.npy"
+    ],
+    "validation_success": [
+      "grasp_20260507_113150_644770_success_raw.npy",
+      "grasp_20260507_113329_010348_success_raw.npy",
+      "grasp_20260507_131031_038218_success_raw.npy",
+      "grasp_20260507_131139_649889_success_raw.npy",
+      "grasp_20260507_133617_943242_success_raw.npy",
+      "grasp_20260507_133755_853476_success_raw.npy",
+      "grasp_20260507_133924_503719_success_raw.npy",
+      "grasp_20260507_134027_148204_success_raw.npy"
+    ],
+    "test_success": [
+      "grasp_20260507_134141_310733_success_raw.npy",
+      "grasp_20260507_134303_407498_success_raw.npy",
+      "grasp_20260507_134647_841701_success_raw.npy",
+      "grasp_20260507_134807_169534_success_raw.npy",
+      "grasp_20260507_135155_385184_success_raw.npy",
+      "grasp_20260507_135340_681743_success_raw.npy",
+      "grasp_20260507_135506_822246_success_raw.npy",
+      "grasp_20260507_140233_973800_success_raw.npy"
+    ],
+    "test_failure": [
+      "grasp_20260504_153722_487634_failure_raw.npy",
+      "grasp_20260504_154302_904662_failure_raw.npy",
+      "grasp_20260504_154335_805430_failure_raw.npy",
+      "grasp_20260504_154705_985805_failure_raw.npy",
+      "grasp_20260504_154744_622715_failure_raw.npy",
+      "grasp_20260504_154834_156252_failure_raw.npy",
+      "grasp_20260504_154931_178161_failure_raw.npy",
+      "grasp_20260504_155328_022049_failure_raw.npy",
+      "grasp_20260507_104817_406623_failure_raw.npy",
+      "grasp_20260507_105133_073893_failure_raw.npy",
+      "grasp_20260507_105500_991859_failure_raw.npy",
+      "grasp_20260507_105547_122589_failure_raw.npy",
+      "grasp_20260507_130316_204246_failure_raw.npy",
+      "grasp_20260507_135830_607777_failure_raw.npy",
+      "grasp_20260507_140357_118575_failure_raw.npy"
+    ]
+  }
+}

@@ -1,0 +1,446 @@
+% ============================================================
+\section{Tactile-based Grasp and Transport Anomaly Detection}
+\label{sec:anomaly}
+% ============================================================
+
+\subsection{Phase-dependent anomaly definition}
+\label{sec:anomaly_definition}
+
+The tactile response of a deformable garment depends strongly on the
+manipulation phase. Before gripper closure, the absence of contact is an
+expected state. After closure, however, persistent absence of contact indicates
+an empty or insufficient grasp. During transport, a failure may instead appear
+as gradual redistribution of the contact forces, partial slip, or abrupt
+contact loss. We therefore activate tactile monitoring only after gripper
+closure and use separate detector configurations for the grasp-confirmation and
+transport phases.
+
+Both configurations follow a one-class formulation. The recurrent models are
+trained only on successful trials and learn the tactile dynamics associated
+with a stable grasp. Failure trials are excluded from model fitting and are
+used only for held-out evaluation. At run time, an anomaly detected in either
+phase interrupts the current motion and invokes the recovery procedure
+described in Section~\ref{sec:overview}.
+
+\subsection{Tactile preprocessing}
+\label{sec:tactile_preprocessing}
+
+The deployed detector uses one $4\times4$ three-axis tactile array. Let
+$\mathbf{s}_i(t)=[s_i^x(t),s_i^y(t),s_i^z(t)]^\top$ denote the raw output of
+taxel $i\in\{1,\ldots,N\}$, where $N=16$. Each sensor axis is normalized using
+the calibration minimum and range:
+%
+\begin{equation}
+    \mathbf{q}_i(t)
+    =
+    \frac{\mathbf{s}_i(t)-\mathbf{s}_{i,\min}}
+         {\mathbf{s}_{i,\mathrm{range}}},
+    \label{eq:taxel_normalization}
+\end{equation}
+%
+where the division is performed elementwise. At the beginning of each
+manipulation phase, the cumulative relative signal is reset and subsequently
+updated as
+%
+\begin{equation}
+    \mathbf{d}_i(t)
+    =
+    \sum_{k=t_s+1}^{t}
+    \bigl(\mathbf{q}_i(k)-\mathbf{q}_i(k-1)\bigr),
+    \label{eq:cumulative_tactile}
+\end{equation}
+%
+where $t_s$ is the phase-start frame. In the absence of a sensor reset,
+Eq.~\eqref{eq:cumulative_tactile} is equivalent to
+$\mathbf{q}_i(t)-\mathbf{q}_i(t_s)$.
+
+For a set of taxel vectors $\{\mathbf{v}_i(t)\}_{i=1}^{N}$, we define
+$r_i(t)=\|\mathbf{v}_i(t)\|_2$ and retain taxels satisfying
+$r_i(t)>\theta_c$, with $\theta_c=0.1$ in the normalized sensor space. The mean
+unit direction and its mean resultant length (MRL) are
+%
+\begin{align}
+    \bar{\mathbf{u}}(t)
+    &=
+    \frac{1}{|\mathcal{V}(t)|}
+    \sum_{i\in\mathcal{V}(t)}
+    \frac{\mathbf{v}_i(t)}{r_i(t)},                                     
+    \label{eq:mean_unit_direction}\\
+    \operatorname{MRL}(t)
+    &=\|\bar{\mathbf{u}}(t)\|_2,
+    \label{eq:implemented_mrl}
+\end{align}
+%
+where $\mathcal{V}(t)=\{i:r_i(t)>\theta_c\}$. We set both quantities to zero
+when fewer than two taxels are active. This unweighted directional statistic
+prevents large-magnitude taxels from dominating the spatial-coherence
+measurement.
+
+\subsection{Grasp-confirmation detector}
+\label{sec:grasp_detector}
+
+\subsubsection{Channel A: 6D GRU autoencoder}
+
+During grasp confirmation, Channel A receives the following six-dimensional
+feature vector computed from $\mathbf{d}_i(t)$:
+%
+\begin{equation}
+    \mathbf{x}^{G}(t)
+    =
+    \left[
+    z(t),\,
+    \rho(t),\,
+    r_{\max}(t),\,
+    \bar{u}_x(t),\,
+    \bar{u}_y(t),\,
+    \bar{u}_z(t)
+    \right]^\top ,
+    \label{eq:grasp_6d}
+\end{equation}
+%
+where $z(t)=\operatorname{MRL}(t)$,
+$r_{\max}(t)=\max_i\|\mathbf{d}_i(t)\|_2$, and
+%
+\begin{equation}
+    \rho(t)
+    =
+    \left\|
+    \frac{\sum_{i=1}^{N}\mathbf{d}_i(t)}
+         {\sum_{i=1}^{N}\|\mathbf{d}_i(t)\|_2+\epsilon}
+    \right\|_2 .
+    \label{eq:grasp_resultant_ratio}
+\end{equation}
+%
+The features are standardized using the mean and standard deviation estimated
+from the successful training trials.
+
+The grasp model is a two-layer GRU autoencoder with hidden dimension 128 and
+dropout 0.2. Given a window
+$\mathbf{X}^{G}_t\in\mathbb{R}^{T\times6}$ of length $T=50$, the encoder maps
+the sequence to its final hidden state and the decoder reconstructs all
+$T$ feature vectors. The anomaly score is the mean squared reconstruction
+error
+%
+\begin{equation}
+    s_G(t)
+    =
+    \frac{1}{6T}
+    \sum_{k=1}^{T}
+    \left\|
+    \mathbf{x}^{G,\mathrm{std}}_{t-T+k}
+    -
+    \hat{\mathbf{x}}^{G,\mathrm{std}}_{t-T+k}
+    \right\|_2^2 .
+    \label{eq:grasp_score}
+\end{equation}
+%
+Inference is evaluated every $q_G=10$ accepted tactile frames after the first
+window has been filled. The reconstruction threshold $\tau_G$ is calibrated
+from reconstruction errors of a stable-grasp calibration set. The trial-level
+separation of the training, calibration, and test sets is specified in
+Section~\ref{sec:experiments}.
+
+The deployed grasp logic additionally contains two guard conditions. First, an
+empty-grasp guard is activated when the maximum MRL observed after closure
+remains below $\tau_{\mathrm{MRL}}=0.3$. Second, a reconstruction score greater
+than $\kappa\tau_G$, with $\kappa=2.2$, is treated as a severe anomaly without
+waiting for repeated regular-threshold exceedances. Thus, the grasp Channel-A
+decision is
+%
+\begin{equation}
+    a_G(t)
+    =
+    \mathbb{I}\!\left[z_{\max}(t)<\tau_{\mathrm{MRL}}\right]
+    \lor
+    \mathbb{I}\!\left[s_G(t)>\kappa\tau_G\right]
+    \lor
+    \mathbb{I}\!\left[s_G(t)>\tau_G\right]_{\times n_G},
+    \label{eq:grasp_channel_a}
+\end{equation}
+%
+where $\mathbb{I}[\cdot]_{\times n}$ denotes persistence for $n$ consecutive
+evaluations. The current grasp checkpoint uses $n_G=1$.
+
+\subsubsection{Channel B: framewise MRL-change detector}
+
+The framewise grasp channel monitors changes in MRL. Let
+$\mathcal{H}_t=\{z(t-W),\ldots,z(t-1)\}$ be the recent history with $W=3$.
+Its framewise change score is
+%
+\begin{equation}
+    \delta_G(t)
+    =
+    \left|
+    z(t)-\frac{1}{W}\sum_{k=1}^{W}z(t-k)
+    \right|.
+    \label{eq:grasp_delta}
+\end{equation}
+%
+The first 30 frames are used as a warm-up period. To suppress unstable MRL
+values under negligible force, the detector is evaluated only when
+$r_{\max}(t)>0.3$. Channel B is activated when
+$\delta_G(t)>\tau_{\delta G}$ for five consecutive frames. The threshold
+$\tau_{\delta G}$ is calibrated from successful grasp trials.
+In the current online implementation, a confirmed Channel-B flag is latched
+and consumed at the next Channel-A inference update. Consequently, the
+grasp-stage response time must be measured from the complete online system and
+must not be equated directly with the five-frame confirmation length.
+
+\subsection{Transport-stage detector}
+\label{sec:transport_detector}
+
+\subsubsection{Stable-grasp reference}
+
+The cumulative signal in Eq.~\eqref{eq:cumulative_tactile} contains the
+contact state present at the beginning of transport. To make the detector
+sensitive to changes from the held-garment state rather than to the absolute
+contact configuration, we estimate a taxel-wise stable-grasp reference from
+the first $B=30$ transport frames:
+%
+\begin{equation}
+    \mathbf{b}_i
+    =
+    \operatorname{median}_{1\leq t\leq B}\mathbf{d}_i(t).
+    \label{eq:transport_baseline}
+\end{equation}
+%
+The transport change vector is then
+%
+\begin{equation}
+    \Delta\mathbf{f}_i(t)=\mathbf{d}_i(t)-\mathbf{b}_i.
+    \label{eq:transport_delta_vector}
+\end{equation}
+%
+The same fixed reference is used for all subsequent frames in the transport
+episode.
+
+\subsubsection{Channel A: relative 9D GRU autoencoder}
+
+Using $\mathbf{v}_i(t)=\Delta\mathbf{f}_i(t)$ in
+Eqs.~\eqref{eq:mean_unit_direction}--\eqref{eq:implemented_mrl}, we form the
+relative nine-dimensional feature vector
+%
+\begin{equation}
+    \mathbf{x}^{T}(t)
+    =
+    \left[
+    z_\Delta(t),\,
+    \mathbf{F}_\Delta(t)^\top,\,
+    \mathbf{M}_\Delta(t)^\top,\,
+    A_\Delta(t),\,
+    r_{\Delta,\max}(t)
+    \right]^\top ,
+    \label{eq:transport_9d}
+\end{equation}
+%
+where
+%
+\begin{align}
+    \mathbf{F}_\Delta(t)
+    &=\sum_{i=1}^{N}\Delta\mathbf{f}_i(t),                             
+    \label{eq:delta_force}\\
+    \mathbf{M}_\Delta(t)
+    &=\sum_{i=1}^{N}\mathbf{p}_i\times\Delta\mathbf{f}_i(t),           
+    \label{eq:delta_moment}\\
+    A_\Delta(t)
+    &=\sum_{i=1}^{N}
+    \sigma\!\left(
+    \alpha\frac{\|\Delta\mathbf{f}_i(t)\|_2-\theta_c}{\theta_c}
+    \right),                                                          
+    \label{eq:changed_taxel_count}\\
+    r_{\Delta,\max}(t)
+    &=\max_i\|\Delta\mathbf{f}_i(t)\|_2.                               
+    \label{eq:peak_delta_norm}
+\end{align}
+%
+Here, $\mathbf{p}_i$ is the planar position of taxel $i$ relative to the
+center of the $4\times4$ array, $\sigma(\cdot)$ is the logistic sigmoid, and
+$\alpha=10$. The soft count $A_\Delta$ represents the spatial extent of
+contact change; it is not interpreted as an absolute physical contact area.
+
+Each feature dimension is standardized using statistics fitted only to the
+successful training windows. To reduce between-window offsets, the first
+standardized feature vector is then subtracted from every frame in the
+window:
+%
+\begin{equation}
+    \tilde{\mathbf{x}}^{T}_k
+    =
+    \mathbf{x}^{T,\mathrm{std}}_k
+    -
+    \mathbf{x}^{T,\mathrm{std}}_1,
+    \qquad k=1,\ldots,T.
+    \label{eq:first_frame_relative}
+\end{equation}
+%
+The transport model is a one-layer GRU autoencoder with hidden dimension 32,
+window length $T=50$, and no dropout. It is trained by minimizing the
+reconstruction MSE of stable transport windows. Its anomaly score is
+%
+\begin{equation}
+    s_T(t)
+    =
+    \frac{1}{9T}
+    \sum_{k=1}^{T}
+    \left\|
+    \tilde{\mathbf{x}}^{T}_{t-T+k}
+    -
+    \hat{\mathbf{x}}^{T}_{t-T+k}
+    \right\|_2^2 .
+    \label{eq:transport_score}
+\end{equation}
+%
+Training windows are extracted with a stride of 10 frames, and online
+inference also uses $q_T=10$. The regular anomaly threshold is the
+$p_A$-th percentile of reconstruction scores on successful validation
+windows:
+%
+\begin{equation}
+    \tau_T
+    =
+    \operatorname{Percentile}_{p_A}
+    \left(\{s_T^{\mathrm{val}}\}\right).
+    \label{eq:transport_threshold}
+\end{equation}
+%
+For the current checkpoint, $p_A=96$ and $\tau_T=0.126551$. A regular
+exceedance must persist for $n_T=2$ consecutive inference windows, whereas
+$s_T(t)>2.2\tau_T$ triggers immediately. Because this feature is already
+defined relative to a stable held-grasp reference, the grasp-stage MRL
+empty-contact guard is disabled during transport.
+
+\subsubsection{Channel B: absolute contact-loss detector}
+\label{sec:transport_channel_b}
+
+Channel A models changes in the relative tactile dynamics. To directly detect
+loss of absolute contact, transport Channel B uses the raw sensor level after
+removing the empty-gripper offset. Before grasping, an unloaded reference
+$\mathbf{s}_{i,0}$ is estimated as the median of 20 stationary samples. The
+zero-corrected and range-normalized taxel vector is
+%
+\begin{equation}
+    \mathbf{g}_i(t)
+    =
+    \frac{\mathbf{s}_i(t)-\mathbf{s}_{i,0}}
+         {\mathbf{s}_{i,\mathrm{range}}}.
+    \label{eq:zero_corrected_force}
+\end{equation}
+%
+The contact threshold is adapted to the measured unloaded noise:
+%
+\begin{equation}
+    \theta_0
+    =
+    \max\left(
+    0.03,\,
+    3\,\operatorname{Percentile}_{99}
+    \{\|\mathbf{g}_i(t)\|_2\}_{\mathrm{unloaded}}
+    \right).
+    \label{eq:contact_noise_threshold}
+\end{equation}
+%
+We compute a soft contact count and a robust force-magnitude statistic:
+%
+\begin{align}
+    C(t)
+    &=
+    \sum_{i=1}^{N}
+    \sigma\!\left(
+    10\frac{\|\mathbf{g}_i(t)\|_2-\theta_0}{\theta_0}
+    \right),                                                          
+    \label{eq:absolute_contact_count}\\
+    P_3(t)
+    &=
+    \operatorname{mean}
+    \left(
+    \operatorname{Top3}_{i}
+    \|\mathbf{g}_i(t)\|_2
+    \right).
+    \label{eq:top3_force}
+\end{align}
+%
+Their stable-grasp references, $C_0$ and $P_{3,0}$, are the medians of the
+first 30 transport frames. The relative contact and force drops are
+%
+\begin{align}
+    d_C(t)
+    &=\max\left(0,\frac{C_0-C(t)}{C_0}\right),                         
+    \label{eq:contact_drop}\\
+    d_P(t)
+    &=\max\left(0,\frac{P_{3,0}-P_3(t)}{P_{3,0}}\right).               
+    \label{eq:force_drop}
+\end{align}
+%
+Channel B is positive when $d_C(t)>0.25$ or $d_P(t)>0.30$. An anomaly is
+confirmed after five consecutive positive frames. A severe drop,
+$\max(d_C(t),d_P(t))>0.60$, is confirmed immediately.
+
+\subsection{Decision fusion and online execution}
+\label{sec:tactile_fusion}
+
+Within each phase, the final tactile decision is the logical OR of its two
+channels:
+%
+\begin{equation}
+    a_{\mathrm{phase}}(t)
+    =
+    a_{\mathrm{phase},A}(t)
+    \lor
+    a_{\mathrm{phase},B}(t).
+    \label{eq:phase_fusion}
+\end{equation}
+%
+The channels are complementary in both input representation and temporal
+behavior. The GRU channel detects multivariate temporal patterns that deviate
+from successful grasp or transport sequences. The framewise channel provides
+an additional response to abrupt changes: MRL change during grasp confirmation
+and absolute contact loss during transport. During grasp confirmation its flag
+is consumed at the next recurrent-model update, whereas transport Channel B
+can interrupt the motion immediately after its own confirmation rule is
+satisfied.
+
+For transport, the first 30 frames establish both the relative 9D baseline and
+the absolute-contact baseline. Channel A first becomes available after its
+50-frame window is filled, while Channel B is evaluated on every subsequent
+accepted tactile frame. Once either channel confirms an anomaly, the current
+motion is halted and the recovery state machine performs re-localization and
+re-grasping. Detection latency is reported in Section~\ref{sec:experiments}
+using sensor timestamps and the actual motion-stop time rather than converting
+frame counts using the nominal sensor publication rate.
+
+\begin{table*}[t]
+\caption{Phase-dependent configuration of the deployed tactile anomaly
+detector. Thresholds marked ``validation'' are calibrated using successful
+validation trials.}
+\label{tab:tactile_detector_configuration}
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lllll}
+\hline
+Phase and channel & Input & Temporal context & Confirmation & Detection target \\
+\hline
+Grasp A
+& 6D tactile feature
+& 50-frame GRU-AE, stride 10
+& validation threshold; severe and empty-grasp guards
+& empty or unstable grasp \\
+Grasp B
+& MRL change
+& 3-frame reference
+& 5 consecutive frames
+& abrupt directional change \\
+Transport A
+& stable-baseline relative 9D
+& 50-frame GRU-AE, stride 10
+& $p96$, 2 consecutive windows; $2.2\tau_T$ severe cutoff
+& multivariate contact-pattern deviation \\
+Transport B
+& contact-count and Top-3 force drops
+& 30-frame stable baseline
+& 5 consecutive frames; 60\% severe cutoff
+& abrupt absolute contact loss \\
+\hline
+\end{tabular}
+}
+\end{table*}

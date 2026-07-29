@@ -49,6 +49,12 @@ Piper_sdk_ui/
 # Binary data files (root level)
 *.npy
 *.pkl
+*.pt
+*.pth
+*.npz
+
+# Per-episode raw eval dumps
+transport_event_eval/
 
 # Logs
 *.log

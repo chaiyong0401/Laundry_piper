@@ -1,0 +1,89 @@
+{
+  "configurations": {
+    "A": {
+      "failure_trials": 41,
+      "true_positive": 36,
+      "false_positive": 3,
+      "false_negative": 5,
+      "event_precision": 0.9230769230769231,
+      "event_recall": 0.8780487804878049,
+      "event_f1": 0.9,
+      "event_recall_95ci": [
+        0.7445578847902312,
+        0.9467666353142228
+      ],
+      "stable_trials": 31,
+      "stable_false_positive_trials": 3,
+      "stable_false_trial_rate": 0.0967741935483871,
+      "pre_onset_false_positive_trials": 0,
+      "median_latency_s": 0.3609742115,
+      "latency_iqr_s": [
+        0.24408386899999998,
+        0.54014442825
+      ],
+      "gradual_detected_before_loss": 16,
+      "gradual_lead_count": 16,
+      "median_gradual_lead_s": 0.3855208115,
+      "gradual_no_loss_trials": 3,
+      "gradual_no_loss_trigger_trials": 3,
+      "gradual_no_loss_trigger_rate": 1.0
+    },
+    "B": {
+      "failure_trials": 41,
+      "true_positive": 40,
+      "false_positive": 1,
+      "false_negative": 1,
+      "event_precision": 0.975609756097561,
+      "event_recall": 0.975609756097561,
+      "event_f1": 0.975609756097561,
+      "event_recall_95ci": [
+        0.8740493794422576,
+        0.9956814684310874
+      ],
+      "stable_trials": 31,
+      "stable_false_positive_trials": 0,
+      "stable_false_trial_rate": 0.0,
+      "pre_onset_false_positive_trials": 1,
+      "median_latency_s": 0.212444217,
+      "latency_iqr_s": [
+        0.10739346925,
+        0.41492730475
+      ],
+      "gradual_detected_before_loss": 20,
+      "gradual_lead_count": 20,
+      "median_gradual_lead_s": 0.4038435695,
+      "gradual_no_loss_trials": 3,
+      "gradual_no_loss_trigger_trials": 3,
+      "gradual_no_loss_trigger_rate": 1.0
+    },
+    "A_OR_B": {
+      "failure_trials": 41,
+      "true_positive": 40,
+      "false_positive": 4,
+      "false_negative": 1,
+      "event_precision": 0.9090909090909091,
+      "event_recall": 0.975609756097561,
+      "event_f1": 0.9411764705882352,
+      "event_recall_95ci": [
+        0.8740493794422576,
+        0.9956814684310874
+      ],
+      "stable_trials": 31,
+      "stable_false_positive_trials": 3,
+      "stable_false_trial_rate": 0.0967741935483871,
+      "pre_onset_false_positive_trials": 1,
+      "median_latency_s": 0.1893665765,
+      "latency_iqr_s": [
+        0.10739346925,
+        0.4021563145
+      ],
+      "gradual_detected_before_loss": 20,
+      "gradual_lead_count": 20,
+      "median_gradual_lead_s": 0.4399317175,
+      "gradual_no_loss_trials": 3,
+      "gradual_no_loss_trigger_trials": 3,
+      "gradual_no_loss_trigger_rate": 1.0
+    }
+  },
+  "trial_count": 84
+}

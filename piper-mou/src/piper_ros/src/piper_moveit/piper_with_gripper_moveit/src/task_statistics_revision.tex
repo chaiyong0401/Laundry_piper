@@ -1,0 +1,44 @@
+% Drop-in statistical reporting for the current full-task results.
+% Generated from analyze_task_statistics.py using independent-group tests.
+
+\paragraph{Statistical analysis.}
+Task-level success proportions are reported with two-sided 95\% exact
+Clopper--Pearson confidence intervals. Because the three system variants were
+evaluated in separate trial sets, pairwise differences were assessed using
+two-sided Fisher's exact tests. The primary comparison was the recoverable
+system against the proposed single-shot system; comparisons with ACT were
+treated as secondary.
+
+The recoverable system achieved a TSR of 92.0\% (46/50; 95\% CI:
+80.8--97.8\%), compared with 78.0\% for the single-shot system (39/50; 95\%
+CI: 64.0--88.5\%). This corresponds to an observed improvement of 14.0
+percentage points (Newcombe 95\% CI for the difference:
+$-0.2$--28.1 percentage points). The difference did not reach the conventional
+0.05 significance level in a two-sided Fisher's exact test
+($p=0.091$). We therefore interpret the result as an observed practical
+improvement rather than conclusive statistical evidence of superiority.
+
+Relative to ACT (24/50, 48.0\%; 95\% CI: 33.7--62.6\%), the single-shot and
+recoverable systems showed differences of 30.0 percentage points
+($p=0.0035$) and 44.0 percentage points ($p<0.001$), respectively. These
+cross-method comparisons should be interpreted together with the differences
+in policy structure and recovery capability described in the experimental
+protocol.
+
+% Optional compact table if confidence intervals do not fit in the main task
+% table. Keep the original count-based task table and cite this table after it.
+\begin{table}[t]
+\caption{Task success rates with exact 95\% binomial confidence intervals.}
+\label{tab:task_statistics}
+\centering
+\small
+\begin{tabular}{lcc}
+\hline
+Method & TSR & 95\% CI \\
+\hline
+ACT & 48.0\% (24/50) & 33.7--62.6\% \\
+Ours single-shot & 78.0\% (39/50) & 64.0--88.5\% \\
+Ours recoverable & 92.0\% (46/50) & 80.8--97.8\% \\
+\hline
+\end{tabular}
+\end{table}

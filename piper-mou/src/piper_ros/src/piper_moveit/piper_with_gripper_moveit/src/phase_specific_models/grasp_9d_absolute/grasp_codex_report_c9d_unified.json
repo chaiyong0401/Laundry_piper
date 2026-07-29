@@ -1,0 +1,368 @@
+{
+  "config": {
+    "model": "grasp",
+    "data_dir": "/home/dyros/mcy_ws/grasp_05",
+    "output_dir": "/home/dyros/mcy_ws/piper-mou/src/piper_ros/src/piper_moveit/piper_with_gripper_moveit/src/phase_specific_models/grasp_9d_absolute",
+    "use_raw": false,
+    "use_9d": false,
+    "use_c9d_unified": true,
+    "use_8d": false,
+    "use_10d": false,
+    "use_11d": false,
+    "use_9d_relative": false,
+    "use_11d_codex": false,
+    "windowed": true,
+    "seq_len": 50,
+    "win_stride": 10,
+    "infer_stride": 10,
+    "split": "chronological",
+    "val_ratio": 0.15,
+    "test_ratio": 0.15,
+    "seed": 42,
+    "hidden_dim": 32,
+    "num_layers": 1,
+    "dropout": 0.0,
+    "epochs": 400,
+    "batch_size": 32,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "patience": 20,
+    "threshold_pct": 95.0,
+    "threshold_scope": "episode_max",
+    "relative": "none",
+    "weight_alpha": 0.0,
+    "hybrid": false,
+    "acontact_thresh": 0.1,
+    "delta_active_thresh": 0.1,
+    "delta_active_sharpness": 10.0,
+    "baseline_frames": 30,
+    "change_threshold": 0.1,
+    "change_sharpness": 10.0,
+    "mrl_thresh": 0.3,
+    "disable_mrl_guard": true,
+    "cutoff_multiplier": 2.2,
+    "consec": 2,
+    "eval": true,
+    "dry_run": false
+  },
+  "feature_names": [
+    "mrl",
+    "fx",
+    "fy",
+    "fz",
+    "mx",
+    "my",
+    "mz",
+    "active_contact",
+    "peak_force"
+  ],
+  "threshold": 0.34501217901706693,
+  "validation_score_mean": 0.10668676320435197,
+  "validation_score_max": 0.3717938959598541,
+  "metrics": {
+    "test_success": {
+      "episodes": 8,
+      "detected": 0,
+      "detection_rate": 0.0,
+      "first_reason": {},
+      "details": [
+        {
+          "file": "grasp_20260507_134141_310733_success_raw.npy",
+          "frames": 170,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.10349556803703308,
+          "mean_score": 0.025991758833137844
+        },
+        {
+          "file": "grasp_20260507_134303_407498_success_raw.npy",
+          "frames": 154,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.0790814682841301,
+          "mean_score": 0.018182277806441893
+        },
+        {
+          "file": "grasp_20260507_134647_841701_success_raw.npy",
+          "frames": 154,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.18438218533992767,
+          "mean_score": 0.0968920649452643
+        },
+        {
+          "file": "grasp_20260507_134807_169534_success_raw.npy",
+          "frames": 188,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.0934981256723404,
+          "mean_score": 0.03851319689835821
+        },
+        {
+          "file": "grasp_20260507_135155_385184_success_raw.npy",
+          "frames": 193,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.044421982020139694,
+          "mean_score": 0.018718624487519264
+        },
+        {
+          "file": "grasp_20260507_135340_681743_success_raw.npy",
+          "frames": 151,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.12179571390151978,
+          "mean_score": 0.03012395108287985
+        },
+        {
+          "file": "grasp_20260507_135506_822246_success_raw.npy",
+          "frames": 205,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.16624343395233154,
+          "mean_score": 0.04558426607400179
+        },
+        {
+          "file": "grasp_20260507_140233_973800_success_raw.npy",
+          "frames": 360,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.13071483373641968,
+          "mean_score": 0.08488595206290483
+        }
+      ]
+    },
+    "failure": {
+      "episodes": 15,
+      "detected": 4,
+      "detection_rate": 0.26666666666666666,
+      "first_reason": {
+        "rule3": 1,
+        "rule2": 3
+      },
+      "details": [
+        {
+          "file": "grasp_20260504_153722_487634_failure_raw.npy",
+          "frames": 149,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.05351267009973526,
+          "mean_score": 0.016346273198723792
+        },
+        {
+          "file": "grasp_20260504_154302_904662_failure_raw.npy",
+          "frames": 140,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.062086135149002075,
+          "mean_score": 0.030968957208096982
+        },
+        {
+          "file": "grasp_20260504_154335_805430_failure_raw.npy",
+          "frames": 275,
+          "detected": true,
+          "detection_frame": 59,
+          "reason": "rule3",
+          "max_score": 5.812465667724609,
+          "mean_score": 1.2259376042562982
+        },
+        {
+          "file": "grasp_20260504_154705_985805_failure_raw.npy",
+          "frames": 188,
+          "detected": true,
+          "detection_frame": 169,
+          "reason": "rule2",
+          "max_score": 1.3757615089416504,
+          "mean_score": 0.1858934460074774
+        },
+        {
+          "file": "grasp_20260504_154744_622715_failure_raw.npy",
+          "frames": 219,
+          "detected": true,
+          "detection_frame": 189,
+          "reason": "rule2",
+          "max_score": 1.6477546691894531,
+          "mean_score": 0.270497141077238
+        },
+        {
+          "file": "grasp_20260504_154834_156252_failure_raw.npy",
+          "frames": 338,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.33188244700431824,
+          "mean_score": 0.11602023548992543
+        },
+        {
+          "file": "grasp_20260504_154931_178161_failure_raw.npy",
+          "frames": 263,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.09243030846118927,
+          "mean_score": 0.025777118534527042
+        },
+        {
+          "file": "grasp_20260504_155328_022049_failure_raw.npy",
+          "frames": 209,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.09854145348072052,
+          "mean_score": 0.02315814874600619
+        },
+        {
+          "file": "grasp_20260507_104817_406623_failure_raw.npy",
+          "frames": 267,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.09766172617673874,
+          "mean_score": 0.03238900209015066
+        },
+        {
+          "file": "grasp_20260507_105133_073893_failure_raw.npy",
+          "frames": 237,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.07657986879348755,
+          "mean_score": 0.03267701156437397
+        },
+        {
+          "file": "grasp_20260507_105500_991859_failure_raw.npy",
+          "frames": 209,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.11413846909999847,
+          "mean_score": 0.07902935985475779
+        },
+        {
+          "file": "grasp_20260507_105547_122589_failure_raw.npy",
+          "frames": 286,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.13913241028785706,
+          "mean_score": 0.04269238852430135
+        },
+        {
+          "file": "grasp_20260507_130316_204246_failure_raw.npy",
+          "frames": 205,
+          "detected": true,
+          "detection_frame": 49,
+          "reason": "rule2",
+          "max_score": 2.271191120147705,
+          "mean_score": 0.9774438941967674
+        },
+        {
+          "file": "grasp_20260507_135830_607777_failure_raw.npy",
+          "frames": 155,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.05184536427259445,
+          "mean_score": 0.031244715337048878
+        },
+        {
+          "file": "grasp_20260507_140357_118575_failure_raw.npy",
+          "frames": 207,
+          "detected": false,
+          "detection_frame": null,
+          "reason": null,
+          "max_score": 0.09736248105764389,
+          "mean_score": 0.033245752478251234
+        }
+      ]
+    },
+    "window_roc_auc": 0.5410952600092038,
+    "window_average_precision": 0.753457981137161
+  },
+  "manifest": {
+    "train_success": [
+      "grasp_20260504_152957_487532_success_raw.npy",
+      "grasp_20260504_153117_032589_success_raw.npy",
+      "grasp_20260504_153319_640148_success_raw.npy",
+      "grasp_20260504_153513_146743_success_raw.npy",
+      "grasp_20260504_153624_109965_success_raw.npy",
+      "grasp_20260504_153827_774826_success_raw.npy",
+      "grasp_20260504_154152_207644_success_raw.npy",
+      "grasp_20260504_154428_807279_success_raw.npy",
+      "grasp_20260504_154536_350802_success_raw.npy",
+      "grasp_20260504_155119_357249_success_raw.npy",
+      "grasp_20260504_155432_080745_success_raw.npy",
+      "grasp_20260504_155618_326296_success_raw.npy",
+      "grasp_20260504_155900_977227_success_raw.npy",
+      "grasp_20260504_160029_358711_success_raw.npy",
+      "grasp_20260504_160144_933432_success_raw.npy",
+      "grasp_20260507_104937_266227_success_raw.npy",
+      "grasp_20260507_105314_137277_success_raw.npy",
+      "grasp_20260507_105646_080714_success_raw.npy",
+      "grasp_20260507_105832_679755_success_raw.npy",
+      "grasp_20260507_110033_327653_success_raw.npy",
+      "grasp_20260507_110222_480891_success_raw.npy",
+      "grasp_20260507_110357_042439_success_raw.npy",
+      "grasp_20260507_110537_663771_success_raw.npy",
+      "grasp_20260507_110729_914543_success_raw.npy",
+      "grasp_20260507_110939_296687_success_raw.npy",
+      "grasp_20260507_111129_314010_success_raw.npy",
+      "grasp_20260507_111325_943275_success_raw.npy",
+      "grasp_20260507_111502_389311_success_raw.npy",
+      "grasp_20260507_111703_017609_success_raw.npy",
+      "grasp_20260507_111828_279754_success_raw.npy",
+      "grasp_20260507_111953_961677_success_raw.npy",
+      "grasp_20260507_112301_549548_success_raw.npy",
+      "grasp_20260507_112451_530766_success_raw.npy",
+      "grasp_20260507_112616_366342_success_raw.npy",
+      "grasp_20260507_112958_283167_success_raw.npy"
+    ],
+    "validation_success": [
+      "grasp_20260507_113150_644770_success_raw.npy",
+      "grasp_20260507_113329_010348_success_raw.npy",
+      "grasp_20260507_131031_038218_success_raw.npy",
+      "grasp_20260507_131139_649889_success_raw.npy",
+      "grasp_20260507_133617_943242_success_raw.npy",
+      "grasp_20260507_133755_853476_success_raw.npy",
+      "grasp_20260507_133924_503719_success_raw.npy",
+      "grasp_20260507_134027_148204_success_raw.npy"
+    ],
+    "test_success": [
+      "grasp_20260507_134141_310733_success_raw.npy",
+      "grasp_20260507_134303_407498_success_raw.npy",
+      "grasp_20260507_134647_841701_success_raw.npy",
+      "grasp_20260507_134807_169534_success_raw.npy",
+      "grasp_20260507_135155_385184_success_raw.npy",
+      "grasp_20260507_135340_681743_success_raw.npy",
+      "grasp_20260507_135506_822246_success_raw.npy",
+      "grasp_20260507_140233_973800_success_raw.npy"
+    ],
+    "test_failure": [
+      "grasp_20260504_153722_487634_failure_raw.npy",
+      "grasp_20260504_154302_904662_failure_raw.npy",
+      "grasp_20260504_154335_805430_failure_raw.npy",
+      "grasp_20260504_154705_985805_failure_raw.npy",
+      "grasp_20260504_154744_622715_failure_raw.npy",
+      "grasp_20260504_154834_156252_failure_raw.npy",
+      "grasp_20260504_154931_178161_failure_raw.npy",
+      "grasp_20260504_155328_022049_failure_raw.npy",
+      "grasp_20260507_104817_406623_failure_raw.npy",
+      "grasp_20260507_105133_073893_failure_raw.npy",
+      "grasp_20260507_105500_991859_failure_raw.npy",
+      "grasp_20260507_105547_122589_failure_raw.npy",
+      "grasp_20260507_130316_204246_failure_raw.npy",
+      "grasp_20260507_135830_607777_failure_raw.npy",
+      "grasp_20260507_140357_118575_failure_raw.npy"
+    ]
+  }
+}

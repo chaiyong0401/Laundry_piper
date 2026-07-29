@@ -12,7 +12,7 @@ from tf2_ros.transform_listener import TransformListener
 from action_msgs.msg import GoalStatus
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Pose, PoseStamped
-from std_msgs.msg import Bool, Float32MultiArray # Added Float32MultiArray
+from std_msgs.msg import Bool, Float32MultiArray, String # Added Float32MultiArray
 from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectoryPoint, JointTrajectory
 from builtin_interfaces.msg import Duration
@@ -41,6 +41,7 @@ from transport_features import (
     compute_transport_9d_relative,
     compute_transport_11d_delta,
 )
+from transport_event_logger import TransportEventLogger
 
 
 ########################## 비지도 클러스터링 ####################################################
@@ -126,7 +127,14 @@ class ControlTower(Node):
     def __init__(self, run_mode: str = 'normal', use_tactile_api: bool = False,
                  threshold_a_override: float = None,
                  infer_stride_override: int = None,
-                 consec_override: int = None):
+                 consec_override: int = None,
+                 eval_log: bool = False,
+                 eval_log_dir: str = "/home/dyros/mcy_ws/transport_event_eval",
+                 eval_trial_type: str = "stable",
+                 monitor_only: bool = False,
+                 gradual_opening: float = 0.03,
+                 gradual_duration: float = 5.0,
+                 gradual_observation: float = 1.0):
         super().__init__('control_tower_node')
         # run_mode: 'normal'   → 기존 동작 (rule-based 판단, 데이터 수집 없음)
         #           'collect'  → 데이터 수집 모드 (human labeling)
@@ -151,9 +159,29 @@ class ControlTower(Node):
         self.transport_threshold_a_override = threshold_a_override
         self.transport_infer_stride_override = infer_stride_override
         self.transport_consec_override = consec_override
+        self.transport_eval_trial_type = eval_trial_type
+        self.transport_eval_monitor_only = bool(monitor_only)
+        self.transport_eval_gradual_opening = float(gradual_opening)
+        self.transport_eval_gradual_duration = float(gradual_duration)
+        self.transport_eval_gradual_observation = float(gradual_observation)
+        self._transport_gradual_result = None
+        self.transport_eval_logger = TransportEventLogger(
+            enabled=eval_log, output_dir=eval_log_dir)
+        self.transport_eval_a_consec = 0
         self.get_logger().info(
             f"[MODE] 요청 모드: {self.requested_run_mode}, "
             f"내부 모드: {self.run_mode}, use_tactile_api={self.use_tactile_api}")
+        if eval_log:
+            self.get_logger().info(
+                f"[EVENT-EVAL] logging enabled: dir={eval_log_dir}, "
+                f"trial_type={eval_trial_type}, "
+                f"monitor_only={self.transport_eval_monitor_only}")
+            if eval_trial_type == "gradual":
+                self.get_logger().info(
+                    "[EVENT-EVAL] automatic gradual release: "
+                    f"target={self.transport_eval_gradual_opening:.4f}, "
+                    f"duration={self.transport_eval_gradual_duration:.2f}s, "
+                    f"observation={self.transport_eval_gradual_observation:.2f}s")
 
         self._timing_log = []  # [(label, elapsed_sec), ...]
 
@@ -397,6 +425,13 @@ class ControlTower(Node):
                                  callback_group=self._sensor_cb_group)
         self.create_subscription(JointState, '/joint_states', self.joint_state_callback, 10,
                                  callback_group=self._sensor_cb_group)
+        self.create_subscription(
+            String,
+            '/transport_eval/event',
+            self.transport_eval_event_callback,
+            10,
+            callback_group=self._sensor_cb_group,
+        )
         
         self.current_joint_state = None
 
@@ -592,7 +627,9 @@ class ControlTower(Node):
         self.ee_pose_st = st
 
     # 사용자님의 원본 _send_goal 함수
-    def _send_goal(self, client, joint_names, joint_values, wait_for_result=True, timeout_sec=30.0, fast=False):
+    def _send_goal(self, client, joint_names, joint_values,
+                   wait_for_result=True, timeout_sec=30.0, fast=False,
+                   trajectory_duration_sec=None):
         goal_msg = FollowJointTrajectory.Goal()
         goal_msg.trajectory.joint_names = joint_names
         goal_msg.trajectory.header.stamp = self.get_clock().now().to_msg()
@@ -627,7 +664,12 @@ class ControlTower(Node):
             duration_sec = 1.5 if fast else 3.0
 
         if set(joint_names) == set(self.gripper_joint_names):
-            point.time_from_start = Duration(sec=1, nanosec=0)
+            gripper_duration = (
+                1.0 if trajectory_duration_sec is None
+                else float(trajectory_duration_sec))
+            s = int(gripper_duration)
+            ns = int((gripper_duration - s) * 1e9)
+            point.time_from_start = Duration(sec=s, nanosec=ns)
         else:
             s = int(duration_sec)
             ns = int((duration_sec - s) * 1e9)
@@ -660,7 +702,11 @@ class ControlTower(Node):
 
         # 결과 대기 타임아웃: 그리퍼는 3s, 팔은 timeout_sec (기본 30s)
         is_gripper = set(joint_names) == set(self.gripper_joint_names)
-        result_timeout = 3.0 if is_gripper else timeout_sec
+        result_timeout = (
+            max(3.0, float(trajectory_duration_sec) + 2.0)
+            if is_gripper and trajectory_duration_sec is not None
+            else 3.0 if is_gripper else timeout_sec
+        )
 
         get_result_future = goal_handle.get_result_async()
         # executor가 spin 중 → polling으로 대기
@@ -764,13 +810,15 @@ class ControlTower(Node):
 
         return True
 
-    def send_gripper_command(self, joint7, joint8, wait_for_result=True):
+    def send_gripper_command(self, joint7, joint8, wait_for_result=True,
+                             duration_sec=None):
         gripper_target = [joint7, joint8]
         return self._send_goal(
             self._gripper_client,
             self.gripper_joint_names,
             gripper_target,
-            wait_for_result=wait_for_result
+            wait_for_result=wait_for_result,
+            trajectory_duration_sec=duration_sec,
         )
     
     def open_gripper(self):
@@ -1401,6 +1449,192 @@ class ControlTower(Node):
         self.transport_delta_b_latest = 0.0
         self.transport_delta_b_current = 0.0
         self._transport_9d_relative_baseline = None
+        self.transport_eval_a_consec = 0
+
+    def _start_transport_eval_trial(self):
+        """Start an independently labelled transport detector evaluation trial."""
+        if not self.transport_eval_logger.enabled:
+            return
+        with self._sensor_raw_lock:
+            sensor_zero = (
+                None if self._sensor_zero_raw is None
+                else self._sensor_zero_raw.copy())
+        config = {
+            "requested_mode": self.requested_run_mode,
+            "model": (
+                "relative_9d" if self.transport_use_9d_relative
+                else "revised_11d" if self.transport_use_11d_codex
+                else "legacy"
+            ),
+            "threshold_a": float(self.insert_gru_ae_threshold),
+            "stride_a": int(self.insert_inference_stride),
+            "consec_a": int(self.insert_infer_consec_anomaly_needed),
+            "window_a": 50,
+            "baseline_frames": int(
+                self.insert_gru_ae_infer_cfg.get("baseline_frames", 30)),
+            "contact_drop_threshold_b": float(
+                self.transport_ch_b_contact_drop_threshold),
+            "force_drop_threshold_b": float(
+                self.transport_ch_b_force_drop_threshold),
+            "consec_b": int(self.transport_channel_b_consec_needed),
+            "warmup_b": int(self.transport_channel_b_warmup_needed),
+            "severe_drop_threshold_b": 0.60,
+            "monitor_only": self.transport_eval_monitor_only,
+            "gradual_opening": self.transport_eval_gradual_opening,
+            "gradual_duration_s": self.transport_eval_gradual_duration,
+            "gradual_observation_s": self.transport_eval_gradual_observation,
+        }
+        trial_id = self.transport_eval_logger.start_trial(
+            trial_type=self.transport_eval_trial_type,
+            config=config,
+            sensor_zero_raw=sensor_zero,
+        )
+        self.get_logger().info(
+            f"[EVENT-EVAL] trial started: id={trial_id}, "
+            f"type={self.transport_eval_trial_type}")
+
+    def _start_automatic_gradual_release(self):
+        """Open the gripper slowly after both detector baselines are ready."""
+        if (not self.transport_eval_logger.enabled
+                or self.transport_eval_trial_type != "gradual"):
+            return None
+
+        self._transport_gradual_result = {
+            "started": False,
+            "command_succeeded": False,
+            "baseline_ready": False,
+        }
+
+        def release_worker():
+            # Channel A (relative 9D) and Channel B must see the stable grasp
+            # before the release begins. Otherwise the perturbation contaminates
+            # the reference used by both detectors.
+            ready_deadline = time.monotonic() + 10.0
+            while (self.transport_eval_logger.active
+                   and time.monotonic() < ready_deadline):
+                # A baseline alone is insufficient: wait until its first
+                # complete 50-frame GRU window has actually been scored.
+                a_ready = (
+                    (not self.transport_use_9d_relative
+                     or self._transport_9d_relative_baseline is not None)
+                    and self.insert_infer_latest_score is not None)
+                b_ready = (
+                    self._transport_ch_b_contact_baseline is not None
+                    and self._transport_ch_b_force_baseline is not None)
+                if a_ready and b_ready:
+                    self._transport_gradual_result["baseline_ready"] = True
+                    break
+                time.sleep(0.02)
+
+            if not self._transport_gradual_result["baseline_ready"]:
+                self.transport_eval_logger.mark_event(
+                    "release_skipped",
+                    "detector baselines were not ready within 10 seconds")
+                self.get_logger().error(
+                    "[EVENT-EVAL] gradual release skipped: "
+                    "detector baseline timeout")
+                return
+
+            if not self.transport_eval_logger.mark_event(
+                    "perturb_start",
+                    "automatic commanded gradual-release onset"):
+                return
+            self._transport_gradual_result["started"] = True
+            self.get_logger().warn(
+                "[EVENT-EVAL] automatic p: gradual gripper opening started "
+                f"(target={self.transport_eval_gradual_opening:.4f}, "
+                f"duration={self.transport_eval_gradual_duration:.2f}s)")
+            succeeded = self.send_gripper_command(
+                self.transport_eval_gradual_opening,
+                self.transport_eval_gradual_opening,
+                wait_for_result=True,
+                duration_sec=self.transport_eval_gradual_duration)
+            self._transport_gradual_result["command_succeeded"] = bool(succeeded)
+            self.transport_eval_logger.mark_event(
+                "release_command_end",
+                "gradual gripper command succeeded"
+                if succeeded else "gradual gripper command failed")
+            if not succeeded:
+                self.get_logger().error(
+                    "[EVENT-EVAL] gradual gripper command failed")
+
+        thread = threading.Thread(
+            target=release_worker,
+            name="transport-gradual-release",
+            daemon=True)
+        thread.start()
+        return thread
+
+    def _wait_automatic_gradual_release(self, thread) -> str:
+        """Wait for release/observation and classify loss without using A/B."""
+        if thread is None:
+            return "transport_complete"
+        timeout = self.transport_eval_gradual_duration + 13.0
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            self.get_logger().error(
+                "[EVENT-EVAL] gradual release thread timeout")
+            return "gradual_release_timeout"
+        result = self._transport_gradual_result or {}
+        if not result.get("started"):
+            return "gradual_release_not_started"
+        time.sleep(self.transport_eval_gradual_observation)
+        if self.transport_eval_logger.has_event("contact_loss"):
+            return "gradual_loss"
+        return (
+            "gradual_no_loss"
+            if result.get("command_succeeded")
+            else "gradual_release_command_failed"
+        )
+
+    def _finish_transport_eval_trial(self, status: str):
+        """Flush the active evaluation trial even when recovery aborts transport."""
+        path = self.transport_eval_logger.finish_trial(status)
+        if path is not None:
+            self.get_logger().info(
+                f"[EVENT-EVAL] trial saved: {path} (status={status})")
+
+    def transport_eval_event_callback(self, msg):
+        """Receive ground-truth markers without competing for terminal input.
+
+        Publish markers from another terminal:
+          ros2 topic pub --once /transport_eval/event std_msgs/msg/String \
+            "{data: perturb_start}"
+          ros2 topic pub --once /transport_eval/event std_msgs/msg/String \
+            "{data: contact_loss}"
+        """
+        command = msg.data.strip()
+        command_lower = command.lower()
+        aliases = {
+            "p": "perturb_start",
+            "l": "contact_loss",
+            "e": "trial_end",
+        }
+        event_name = aliases.get(command_lower, command_lower)
+
+        if command_lower.startswith("type="):
+            trial_type = command.split("=", 1)[1].strip().lower()
+            if trial_type not in ("stable", "abrupt", "gradual"):
+                self.get_logger().warn(
+                    f"[EVENT-EVAL] invalid trial type: {trial_type}")
+                return
+            self.transport_eval_trial_type = trial_type
+            self.transport_eval_logger.set_trial_type(trial_type)
+            self.get_logger().info(
+                f"[EVENT-EVAL] trial type set to {trial_type}")
+            return
+
+        if event_name not in (
+                "perturb_start", "contact_loss", "trial_end"):
+            self.get_logger().warn(
+                f"[EVENT-EVAL] unknown marker: {command}")
+            return
+        if self.transport_eval_logger.mark_event(event_name):
+            self.get_logger().info(
+                f"[EVENT-EVAL] marker recorded: {event_name}")
+        else:
+            self.get_logger().warn(
+                f"[EVENT-EVAL] no active trial; marker ignored: {event_name}")
 
     def _spin_input(self, prompt: str) -> str:
         """input()을 별도 스레드에서 실행하며 대기.
@@ -1499,6 +1733,7 @@ class ControlTower(Node):
                 self._insert_trigger.clear()
                 score_a = self._run_insert_windowed_inference()
                 if score_a is not None:
+                    a_detection_timestamp_ns = time.monotonic_ns()
                     cfg = getattr(self, "insert_gru_ae_infer_cfg", {})
                     mrl_thresh = float(cfg.get("mrl_thresh", 0.2))
                     mrl_guard_enabled = bool(
@@ -1518,11 +1753,23 @@ class ControlTower(Node):
                         flag_a = flag_a_rule1 or flag_a_rule2 or flag_a_rule3
                         flag_b = self.transport_channel_b_flag
                         is_anomaly = flag_a or flag_b
+                        if flag_a:
+                            if flag_a_rule1 or flag_a_rule2:
+                                self.transport_eval_a_consec = (
+                                    self.insert_infer_consec_anomaly_needed)
+                            else:
+                                self.transport_eval_a_consec += 1
+                        else:
+                            self.transport_eval_a_consec = 0
+                        eval_a_confirmed = (
+                            self.transport_eval_a_consec >=
+                            self.insert_infer_consec_anomaly_needed)
                         
                         channel = ('AB' if flag_a and flag_b else
                                    'A'  if flag_a else
                                    'B'  if flag_b else 'none')
                         self.insert_infer_latest_score = score_a
+                        first_fusion_trigger = False
                         
                         if is_anomaly:
                             if flag_a_rule1 or flag_a_rule2 or flag_b:
@@ -1536,7 +1783,9 @@ class ControlTower(Node):
                                 if not self.insert_anomaly_ever_detected:
                                     self.insert_anomaly_ever_detected = True
                                     self.transport_detect_channel = channel
-                                    self._transport_abort.set()
+                                    first_fusion_trigger = True
+                                    if not self.transport_eval_monitor_only:
+                                        self._transport_abort.set()
                                     self.get_logger().warn(
                                         f"🚨 [TRANSPORT] ANOMALY DETECTED! "
                                         f"score_A={score_a:.4f} (rule1={flag_a_rule1}, rule2={flag_a_rule2}) "
@@ -1556,6 +1805,19 @@ class ControlTower(Node):
                             f"ever={self.insert_anomaly_ever_detected} "
                             f"max_norm={self.max_norm:.3f} norm={self.norm:.3f}"
                         )
+                        self.transport_eval_logger.log_a_update(
+                            timestamp_ns=a_detection_timestamp_ns,
+                            frame_index=self.insert_infer_frame_cnt,
+                            score=score_a,
+                            threshold=self.insert_gru_ae_threshold,
+                            rule1=flag_a_rule1,
+                            rule2=flag_a_rule2,
+                            rule3=flag_a_rule3,
+                            a_instant=flag_a,
+                            a_confirmed=eval_a_confirmed,
+                        )
+                        if first_fusion_trigger:
+                            self.transport_eval_logger.log_trigger(channel)
 
 
     def _load_gru_ae(self):
@@ -2173,7 +2435,8 @@ class ControlTower(Node):
             y_vals = [t.y for t in msg.sensors[0].taxels]
             z_vals = [t.z for t in msg.sensors[0].taxels]
             try:
-                self._raw_sensor_queue.put_nowait((x_vals, y_vals, z_vals))
+                self._raw_sensor_queue.put_nowait(
+                    (time.monotonic_ns(), x_vals, y_vals, z_vals))
             except queue.Full:
                 pass  # 처리 스레드가 밀리면 최신 데이터를 위해 드롭
         except Exception:
@@ -2192,7 +2455,8 @@ class ControlTower(Node):
 
         while True:
             try:
-                x_vals, y_vals, z_vals = self._raw_sensor_queue.get(timeout=0.1)
+                sensor_timestamp_ns, x_vals, y_vals, z_vals = (
+                    self._raw_sensor_queue.get(timeout=0.1))
             except queue.Empty:
                 # ── stale 감지: 마지막 데이터로부터 일정 시간 경과 시 누적값 리셋
                 if (self.prev_x is not None and
@@ -2576,6 +2840,13 @@ class ControlTower(Node):
                             # Channel B uses DC-corrected 3-axis taxel force.
                             # The empty-gripper reference removes the ~35k raw sensor offset;
                             # the first transport frames then define the stable-grasp baseline.
+                            eval_contact_b = float("nan")
+                            eval_contact_baseline = float("nan")
+                            eval_contact_drop = 0.0
+                            eval_force_b = float("nan")
+                            eval_force_baseline = float("nan")
+                            eval_force_drop = 0.0
+                            eval_flag_b = False
                             if self._sensor_zero_raw is None:
                                 flag_b = False
                                 self.transport_channel_b_consec = 0
@@ -2598,6 +2869,8 @@ class ControlTower(Node):
                                 contact_b = float(np.sum(1.0 / (1.0 + np.exp(-sigmoid_arg))))
                                 top3_force_b = float(np.mean(np.partition(taxel_force_b, -3)[-3:]))
                                 peak_taxel_b = int(np.argmax(taxel_force_b))
+                                eval_contact_b = contact_b
+                                eval_force_b = top3_force_b
 
                                 if self._transport_ch_b_contact_baseline is None:
                                     self._transport_ch_b_warmup_contact.append(contact_b)
@@ -2629,6 +2902,17 @@ class ControlTower(Node):
                                         force_drop > self.transport_ch_b_force_drop_threshold
                                     )
 
+                                eval_contact_baseline = (
+                                    float(self._transport_ch_b_contact_baseline)
+                                    if self._transport_ch_b_contact_baseline is not None
+                                    else float("nan"))
+                                eval_force_baseline = (
+                                    float(self._transport_ch_b_force_baseline)
+                                    if self._transport_ch_b_force_baseline is not None
+                                    else float("nan"))
+                                eval_contact_drop = contact_drop
+                                eval_force_drop = force_drop
+                                eval_flag_b = flag_b
                                 delta_b = max(contact_drop, force_drop)
                                 self.transport_delta_b_current = delta_b
                                 print(
@@ -2652,7 +2936,10 @@ class ControlTower(Node):
                                             if not self.insert_anomaly_ever_detected:
                                                 self.insert_anomaly_ever_detected = True
                                                 self.transport_detect_channel = 'B'
-                                                self._transport_abort.set()
+                                                if not self.transport_eval_monitor_only:
+                                                    self._transport_abort.set()
+                                                self.transport_eval_logger.log_trigger(
+                                                    'B')
                                                 self.get_logger().warn(
                                                     "🚨 Slip Recorded! Will recover after motion.")
                                         self.get_logger().error(
@@ -2662,6 +2949,30 @@ class ControlTower(Node):
                                         )
                                 else:
                                     self.transport_channel_b_consec = 0
+
+                            with self._infer_lock:
+                                eval_b_confirmed = bool(
+                                    self.transport_channel_b_flag)
+                                eval_fusion_confirmed = bool(
+                                    self.insert_anomaly_ever_detected)
+                            self.transport_eval_logger.log_sensor_frame(
+                                timestamp_ns=sensor_timestamp_ns,
+                                frame_index=self.insert_infer_frame_cnt,
+                                raw_48d=raw_sensor_vecs.reshape(-1),
+                                model_raw_48d=np.asarray(
+                                    raw_frame, dtype=np.float32),
+                                feature=np.asarray(
+                                    _transport_frame, dtype=np.float32),
+                                contact=eval_contact_b,
+                                contact_baseline=eval_contact_baseline,
+                                contact_drop=eval_contact_drop,
+                                force=eval_force_b,
+                                force_baseline=eval_force_baseline,
+                                force_drop=eval_force_drop,
+                                b_instant=eval_flag_b,
+                                b_confirmed=eval_b_confirmed,
+                                fusion_confirmed=eval_fusion_confirmed,
+                            )
 
                 # Slip Monitoring
                 if getattr(self, "monitor_slip", False):
@@ -4396,6 +4707,7 @@ class ControlTower(Node):
                     self.transport_channel_b.reset()
                 if self.use_tactile_api and self.insert_api_detector is not None:
                     self.insert_api_detector.reset()
+                self._start_transport_eval_trial()
                 self.is_insert_recording = True
                 with self._lock:
                     self.monitor_torque = False
@@ -4405,6 +4717,7 @@ class ControlTower(Node):
                 self.get_logger().info("[DATA] 이송 구간 녹화 시작 (ba_init → open_gripper)")
 
             self._transport_abort.clear()
+            gradual_release_thread = self._start_automatic_gradual_release()
 
             _t = time.time()
             while not self.goal(self.wm_init, 'keep'):
@@ -4417,8 +4730,20 @@ class ControlTower(Node):
             # wm_init 도달 시점에 이상 감지 종료 (wm_end 이동은 감지 없이 진행)
             abort_at_wm_init = self._transport_abort.is_set()
             if self.run_mode == 'inference':
+                gradual_status = self._wait_automatic_gradual_release(
+                    gradual_release_thread)
                 self.is_insert_recording = False
                 self.get_logger().info(f"[DATA] 이송 구간 녹화 종료 (wm_init 도달): {len(self.insert_buffer)} 프레임")
+                if self.transport_eval_trial_type == "gradual":
+                    eval_status = gradual_status
+                elif abort_at_wm_init:
+                    eval_status = "anomaly_abort"
+                elif (self.transport_eval_monitor_only and
+                      self.insert_anomaly_ever_detected):
+                    eval_status = "monitor_only_anomaly_observed"
+                else:
+                    eval_status = "transport_complete"
+                self._finish_transport_eval_trial(eval_status)
 
             # 낙하 감지로 중단된 경우: joint1 조건 확인 후 재파지 또는 바구니 복귀
             if abort_at_wm_init and self.run_mode == 'inference':
@@ -4564,7 +4889,12 @@ class ControlTower(Node):
                                'AB': 'Channel A + B (둘 다)'}.get(detect_ch, detect_ch)
                     self.get_logger().warn(
                         f"[INFERENCE] ❌ 이송 실패 판정 → 극복 동작 트리거  |  감지 채널: {ch_desc}  |  score_A={score_str}")
-                    self.contacted = True
+                    if self.transport_eval_monitor_only:
+                        self.get_logger().warn(
+                            "[EVENT-EVAL] monitor-only: recovery trigger suppressed")
+                        self.contacted = False
+                    else:
+                        self.contacted = True
 
             # Stop Monitoring
             self.monitor_slip = False
@@ -4690,6 +5020,30 @@ def main(args=None):
     parser.add_argument(
         '--consec', type=int, default=None,
         help='Codex Transport regular-threshold consecutive count runtime override')
+    parser.add_argument(
+        '--eval_log', action='store_true',
+        help='Transport A/B event evaluation log 저장')
+    parser.add_argument(
+        '--eval_log_dir',
+        default='/home/dyros/mcy_ws/transport_event_eval',
+        help='Transport event log 출력 폴더')
+    parser.add_argument(
+        '--eval_trial_type',
+        choices=['stable', 'abrupt', 'gradual'],
+        default='stable',
+        help='현재 실행에서 수집할 event trial 종류')
+    parser.add_argument(
+        '--monitor_only', action='store_true',
+        help='이상은 기록하지만 transport 중단/recovery는 실행하지 않음')
+    parser.add_argument(
+        '--gradual_opening', type=float, default=0.03,
+        help='gradual trial의 최종 joint7/joint8 개방값 (기본 0.03)')
+    parser.add_argument(
+        '--gradual_duration', type=float, default=5.0,
+        help='gradual trial의 자동 개방 시간(초)')
+    parser.add_argument(
+        '--gradual_observation', type=float, default=1.0,
+        help='개방 명령 종료 후 contact-loss 입력 대기 시간(초)')
     parsed, ros_args = parser.parse_known_args()
 
     overrides = (parsed.threshold_a, parsed.infer_stride, parsed.consec)
@@ -4704,6 +5058,28 @@ def main(args=None):
         parser.error('--infer_stride는 0보다 커야 합니다.')
     if parsed.consec is not None and parsed.consec <= 0:
         parser.error('--consec는 0보다 커야 합니다.')
+    if parsed.monitor_only and not parsed.eval_log:
+        parser.error('--monitor_only는 --eval_log와 함께 사용해야 합니다.')
+    if parsed.eval_trial_type == 'gradual' and (
+            not parsed.eval_log or not parsed.monitor_only):
+        parser.error(
+            '--eval_trial_type gradual은 --eval_log --monitor_only와 '
+            '함께 사용해야 합니다.')
+    if not 0.0 < parsed.gradual_opening <= 0.03:
+        parser.error('--gradual_opening은 0보다 크고 0.03 이하여야 합니다.')
+    if parsed.gradual_duration <= 0.0:
+        parser.error('--gradual_duration은 0보다 커야 합니다.')
+    if parsed.gradual_observation < 0.0:
+        parser.error('--gradual_observation은 0 이상이어야 합니다.')
+    if parsed.eval_log and parsed.use_tactile_api:
+        parser.error(
+            '--eval_log는 현재 basket_ori.py의 내장 Channel A/B 경로에서만 '
+            '지원하며 --use_tactile_api와 함께 사용할 수 없습니다.')
+    if parsed.eval_log and parsed.mode not in (
+            'inference', 'new_11d', 'new_9d_relative'):
+        parser.error(
+            '--eval_log는 inference/new_11d/new_9d_relative 모드에서만 '
+            '사용할 수 있습니다.')
 
     rclpy.init(args=ros_args if ros_args else args)
 
@@ -4714,6 +5090,13 @@ def main(args=None):
             threshold_a_override=parsed.threshold_a,
             infer_stride_override=parsed.infer_stride,
             consec_override=parsed.consec,
+            eval_log=parsed.eval_log,
+            eval_log_dir=parsed.eval_log_dir,
+            eval_trial_type=parsed.eval_trial_type,
+            monitor_only=parsed.monitor_only,
+            gradual_opening=parsed.gradual_opening,
+            gradual_duration=parsed.gradual_duration,
+            gradual_observation=parsed.gradual_observation,
         )
     except RuntimeError as e:
         print(f"노드 초기화 중 오류 발생: {e}")
@@ -4739,6 +5122,7 @@ def main(args=None):
         node.get_logger().info('사용자에 의해 중단 요청됨.')
     finally:
         node.get_logger().info('노드 종료 중...')
+        node._finish_transport_eval_trial("node_shutdown")
         executor.shutdown()
         if rclpy.ok():
             node.destroy_node()

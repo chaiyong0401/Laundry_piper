@@ -31,12 +31,80 @@ TRANSPORT_9D_RELATIVE_NAMES = (
     "peak_delta_norm",
 )
 
+CONTACT_MRL_9D_NAMES = (
+    "mrl",
+    "fx",
+    "fy",
+    "fz",
+    "mx",
+    "my",
+    "mz",
+    "active_contact",
+    "peak_force",
+)
+
 
 _TAXEL_POSITIONS = np.asarray(
     [[col - 1.5, 1.5 - row, 0.0]
      for row in range(4) for col in range(4)],
     dtype=np.float64,
 )
+
+
+def compute_contact_mrl_9d(
+    raw_cumulative: np.ndarray,
+    active_threshold: float = 0.1,
+    active_sharpness: float = 10.0,
+) -> np.ndarray:
+    """Compute the shared C8D+MRL representation for both task phases.
+
+    The stored historical raw files contain range-normalised cumulative taxel
+    displacement, so the force quantities are proxies rather than calibrated
+    Newton values.  The semantics and implementation are nevertheless
+    identical for grasp and transport:
+
+    ``[MRL, Fx, Fy, Fz, Mx, My, Mz, active_contact, peak_force]``.
+    """
+    raw = np.asarray(raw_cumulative, dtype=np.float64)
+    if raw.ndim != 2 or raw.shape[1] != 48:
+        raise ValueError(
+            f"raw_cumulative must have shape (T, 48), got {raw.shape}")
+    if active_threshold <= 0 or active_sharpness <= 0:
+        raise ValueError("threshold and sharpness must be positive")
+    if not np.isfinite(raw).all():
+        raise ValueError("raw_cumulative must be finite")
+
+    vecs = raw.reshape(-1, 16, 3)
+    norms = np.linalg.norm(vecs, axis=2)
+    valid = norms > active_threshold
+    unit = np.zeros_like(vecs)
+    np.divide(vecs, norms[:, :, None], out=unit, where=valid[:, :, None])
+    valid_count = valid.sum(axis=1)
+    mean_unit = np.zeros((len(raw), 3), dtype=np.float64)
+    usable = valid_count >= 2
+    if np.any(usable):
+        mean_unit[usable] = (
+            unit[usable].sum(axis=1) / valid_count[usable, None])
+    mrl = np.linalg.norm(mean_unit, axis=1)
+
+    resultant = vecs.sum(axis=1)
+    moments = np.cross(
+        _TAXEL_POSITIONS[None, :, :], vecs).sum(axis=1)
+    sigmoid_arg = np.clip(
+        active_sharpness * (norms - active_threshold) / active_threshold,
+        -60.0,
+        60.0,
+    )
+    active_contact = (
+        1.0 / (1.0 + np.exp(-sigmoid_arg))).sum(axis=1)
+    peak_force = norms.max(axis=1)
+    return np.column_stack((
+        mrl,
+        resultant,
+        moments,
+        active_contact,
+        peak_force,
+    )).astype(np.float32)
 
 
 def compute_transport_11d_delta(
