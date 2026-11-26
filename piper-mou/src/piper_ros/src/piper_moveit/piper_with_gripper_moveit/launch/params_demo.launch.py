@@ -72,6 +72,9 @@ def generate_launch_description():
     ))
 
     # ros2_control_node
+    # prefix로 SCHED_FIFO RT 우선순위 부여 (piper_single_ctrl과 동일하게 50).
+    # update_rate=500Hz라서 일반 우선순위(SCHED_OTHER)일 때 다른 프로세스(rviz, 백신 등)와
+    # CPU 경쟁이 생기면 보간 명령이 늦게/불규칙하게 나가서 로봇이 뚝뚝 끊기는 원인이 됨.
     ld.add_action(Node(
         package="controller_manager",
         executable="ros2_control_node",
@@ -79,6 +82,7 @@ def generate_launch_description():
             moveit_config.robot_description,
             str(launch_pkg_path / "config/ros2_controllers.yaml")
         ],
+        prefix="chrt -f 50",
         output="screen"
     ))
 

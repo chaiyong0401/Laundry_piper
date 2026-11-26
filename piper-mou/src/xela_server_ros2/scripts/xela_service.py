@@ -3,9 +3,7 @@
 
 """XELA Sensors Service node"""
 import subprocess
-import os
 import sys
-import asyncio
 import traceback
 import logging
 import signal
@@ -308,14 +306,6 @@ class ArgMgr(object):
         """
         return self.raw
 
-    def startup(self):
-        """
-        Log the startup configuration to the terminal.
-        """
-        self._msg.print(
-            "Startup:\n\t\tConf:\t\033[32m{}\033[0m\n\t\tAddr:\t\033[32m{}\033[0m\n\t\tPort:\t\033[32m{}\033[0m\n".format(
-                self.ch.file, self.ch.ip, self.ch.port))
-
 
 def tup(com):
     a, _ = com.communicate()
@@ -327,22 +317,8 @@ ROS_V = subprocess.Popen(["printenv", "ROS_VERSION"], stdout=subprocess.PIPE)
 ROS_DISTRO = f"{tup(ROS_D)}".replace("\n", "")
 ROS_VERSION = f"{tup(ROS_V)}".replace("\n", "")
 ROS_RELEASE = f"ROS {ROS_DISTRO.capitalize()} {ROS_VERSION}"
-IAM = os.getpid()
 ARG_HOL = ArgMgr(fstring="pia", logfile="xt.log", col="200:200:255", version=__version__,
                  appname="xela_service")  # pylint: disable = undefined-variable
-
-
-def error_reporter(err, frame=0, mtype="error"):
-    """
-    Report errors with optional line number and message type.
-
-    Args:
-        err: The error message.
-        frame (int, optional): The line number. Default is 0.
-        mtype (str, optional): The type of message. Default is "error".
-    """
-    message = f"[{mtype}]\t{err}" if frame == 0 else f"[{mtype}]\t[Line {frame}] {err}"
-    error(message)
 
 
 info("XELA Server ROS Service handler")
@@ -455,9 +431,6 @@ class ServiceNode(Node):
         warn("Node reset")
 
 
-loop = asyncio.get_event_loop()
-
-
 def message_parser(msg_obj, msg_no: int = 0):
     """
     Parse incoming sensor data messages.
@@ -552,11 +525,9 @@ def on_message(wsapp, message):
                     except Exception as e:
                         error(f"Parser failure: {e2t(e)}")
                         traceback.print_exception(e)
-                        pass
                 the_node.publish(data_container)
         except Exception as e:
-            warn(f"Message parsing failed: {e2t(e)}")
-            pass  # ignore message as it's probably invalid
+            warn(f"Message parsing failed: {e2t(e)}")  # ignore message as it's probably invalid
 
 
 def get_ip(setIP=None):
@@ -682,7 +653,6 @@ def start_server():
             ME_ONLINE.set(False)
             wsapp.close()
             info("Finished")
-            # os.kill(IAM, 15)
         except Exception as exp:
             error(f"EXCEPTION: {e2t(exp)}")
             warn("Ending")
@@ -699,7 +669,6 @@ def spin_srv(executor):
 def cleanup():
     """Clean up the application and handle shutdown."""
     print("Performing cleanup...")
-    # Add your cleanup code here
     ME_ONLINE.set(False)
     time.sleep(1)
     sys.exit(0)
@@ -713,12 +682,6 @@ def shutdown_handler(signum, frame):
 def sig_handler(signum, frame):
     """Handle signals."""
     error("Signal handler called with signal", signum)
-    cleanup()
-
-
-def fatal(message):
-    """Log a fatal error and exit the application."""
-    error("Fatal:", message)
     cleanup()
 
 
@@ -766,7 +729,7 @@ def main():
     ME_ONLINE.set(False)
     time.sleep(2)
     try:
-        wsapp.close()  # asyncio.run_coroutine_threadsafe(sio.disconnect(),loop)
+        wsapp.close()
     except:
         pass
 

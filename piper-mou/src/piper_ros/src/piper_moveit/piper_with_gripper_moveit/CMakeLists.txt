@@ -95,12 +95,3 @@ install(TARGETS
   pose_goal_node
   DESTINATION lib/${PROJECT_NAME}
 )
-
-# Python 실행 파일 설치
-install(
-  PROGRAMS
-    # src/cA.py
-    src/Logic_inte_ba.py
-    src/TEST.py
-  DESTINATION lib/${PROJECT_NAME}
-)

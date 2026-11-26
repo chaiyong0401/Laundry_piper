@@ -9,7 +9,7 @@ from action_msgs.msg import GoalStatus
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Pose, PoseStamped
 from control_msgs.action import FollowJointTrajectory
-from trajectory_msgs.msg import JointTrajectoryPoint, JointTrajectory
+from trajectory_msgs.msg import JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
 from xela_server_ros2.msg import SensStream
 import numpy as np
@@ -22,59 +22,19 @@ from rclpy.clock import Clock
 from collections import deque
 from sensor_msgs.msg import JointState
 
-########################## 비지도 클러스터링 ####################################################
-
-# import joblib
-
-# EPS = 1e-6
-
-# # fcm.joblib 언피클용 최소 클래스(이 이름이 없으면 로드 에러)
-# class FCMModel:
-#     def __init__(self, prep=None, centers=None, m: float = 2.0) -> None:
-#         self.prep = prep
-#         self.centers_ = centers
-#         self.m = float(m)
-
-# def _np64(x):
-#     return np.require(np.asarray(x, dtype=np.float64), dtype=np.float64, requirements=["C"])
-
-# def _extract_imputer_scaler(prep):
-#     """ColumnTransformer('num' 파이프라인)에서 imputer/scaler 파라미터 추출"""
-#     num = prep.named_transformers_["num"]
-#     imputer = num.named_steps["impute"]
-#     scaler  = num.named_steps["scale"]
-#     imp = _np64(imputer.statistics_)     # (3,)
-#     mean = _np64(scaler.mean_)           # (3,)
-#     scale = _np64(scaler.scale_)         # (3,)
-#     scale[scale == 0.0] = 1.0
-#     return imp, mean, scale
-
-# def _preprocess_mb(mb_vec3, imp_stats, mean, scale):
-#     """mb(3,) → impute+standardize → (1,3) float64"""
-#     X = _np64(mb_vec3).reshape(1, 3)
-#     if np.isnan(X).any():
-#         X = np.where(np.isnan(X), imp_stats.reshape(1, 3), X)
-#     Xs = (X - mean.reshape(1, 3)) / scale.reshape(1, 3)
-#     return _np64(Xs)
-
-# def _fcm_membership(Xs, centers, m):
-#     """Xs: (n,3), centers: (C,3) → U: (C,n)"""
-#     Xs = _np64(Xs); centers = _np64(centers)
-#     d = np.linalg.norm(Xs[:, None, :] - centers[None, :, :], axis=2)
-#     d = np.maximum(d, EPS)
-#     power = 2.0 / (m - 1.0)
-#     U = 1.0 / ((d[:, :, None] / d[:, None, :]) ** power).sum(axis=2)
-#     return U.T
-
-##############################################################################################
-
 
 class ControlTower(Node):
 
     def __init__(self, run_mode: str = 'normal'):
         super().__init__('control_tower_node')
-        self.run_mode = run_mode
-        self.get_logger().info(f"[MODE] 실행 모드: {self.run_mode}")
+        # 'inference_pitch': 기존 'inference'와 완전히 같은 생명주기(촉각 GRU-AE 등)를 쓰되,
+        # 드럼 곡률 기반 pitch 보정만 추가로 켠다. 'inference'는 pitch 보정 없이 기존 그대로 동작.
+        self.requested_run_mode = run_mode
+        self.pitch_fix_enabled = (run_mode == 'inference_pitch')
+        self.run_mode = 'inference' if run_mode == 'inference_pitch' else run_mode
+        self.get_logger().info(
+            f"[MODE] 요청 모드: {self.requested_run_mode}, 내부 모드: {self.run_mode}, "
+            f"pitch_fix_enabled={self.pitch_fix_enabled}")
         self._timing_log = []
 
         self.ee_pose = None
@@ -89,47 +49,16 @@ class ControlTower(Node):
         self.z_aligned = False
         self.contacted = False
 
-        self.z_aligned_k = False
-        self.contacted_k = False
-        self.contacted_kk = False
-        self.z_aligned_f = False
-        self.contacted_f = False
-        self.contacted_ff = False
-
         self.norm = None
         self.max_norm = 0.0
         self.theta = None
 
-########################## 비지도 클러스터링 ####################################################
-
-        # # === KMeans/FCM 모델 로드 및 전처리 파라미터 준비 ===
-        self.kmeans_available = False
-        self.fcm_available = False
-
-        self.kmeans = None
-        self.fcm_centers = None
-        self.fcm_m = 2.0
-
-        self.imp_stats = None
-        self.scaler_mean = None
-        self.scaler_scale = None
-
-        self.minmax_path = "/home/dyros/mcy_ws/piper-mou/src/piper_ros/src/piper_moveit/piper_with_gripper_moveit/src/taxel_minmax_norm.npy"
+        self.minmax_path = "/home/user/samsung_laundry/Laundry_piper/piper-mou/src/piper_ros/src/piper_moveit/piper_with_gripper_moveit/src/taxel_minmax_norm.npy"
         self.gmin, self.grng = self._load_minmax(self.minmax_path)
         self.get_logger().info(f"MinMax loaded: {self.minmax_path}")
 
         # [CALIBRATION] Camera Extrinsics (EE to RGB Optical Center)
         # These are used for BOTH coordinate transformation and RViz visualization
-        # [D435i]
-        # self.R_cal = np.array([
-        #     [0.025154, 0.997896, 0.059755],
-        #     [-0.999639, 0.025669, -0.007874],
-        #     [-0.009391, -0.059535, 0.998182]
-        # ])
-        # self.t_cal = np.array([[-0.058162],
-        #                        [0.035760],
-        #                        [0.07954]])
-
         # [D405]
         self.R_cal = np.array([
             [-0.084547, 0.992441, -0.088956],
@@ -139,48 +68,6 @@ class ControlTower(Node):
         self.t_cal = np.array([[-0.050437],
                                [0.007361],
                                [0.061211]])
-        # self.R_cal = np.array([
-        #     [-0.07403140416428758,  0.9970253999896115, -0.02144068499412377],
-        #     [-0.997213265121594,   -0.07381230005954229,  0.010837353249242954],
-        #     [0.009222530183886607,  0.022183239967900933,  0.9997113827508088]])
-        # self.t_cal = np.array([[-0.05615831961252831],
-        #                      [ 0.035761448900299364],
-        #                      [ 0.06590399326489311]]) 
-
-        # # 1) kmeans.joblib (sklearn Pipeline: prep + kmeans)
-        # try:
-        #     km_art = joblib.load("/home/dyros/mcy_ws/piper-mou/src/piper_ros/src/piper_moveit/piper_with_gripper_moveit/src/kmeans_norm.joblib")
-        #     if hasattr(km_art, "named_steps") and "prep" in km_art.named_steps and "kmeans" in km_art.named_steps:
-        #         prep = km_art.named_steps["prep"]
-        #         self.kmeans = km_art.named_steps["kmeans"]
-        #         self.imp_stats, self.scaler_mean, self.scaler_scale = _extract_imputer_scaler(prep)
-        #         self.kmeans_available = True
-        #         self.get_logger().info("Loaded kmeans.joblib")
-        # except Exception as e:
-        #     self.get_logger().warn(f"kmeans.joblib load failed: {e}")
-
-        # # 2) fcm.joblib (dict 또는 FCMModel)
-        # try:
-        #     fc_art = joblib.load("/home/dyros/mcy_ws/piper-mou/src/piper_ros/src/piper_moveit/piper_with_gripper_moveit/src/fcm_norm.joblib")
-        #     if isinstance(fc_art, dict) and fc_art.get("type", "") == "fcm":
-        #         prep = fc_art["prep"]
-        #         self.imp_stats, self.scaler_mean, self.scaler_scale = _extract_imputer_scaler(prep)
-        #         self.fcm_centers = _np64(fc_art["centers"])  # (C,3) 표준화 공간
-        #         self.fcm_m = float(fc_art.get("m", 2.0))
-        #         self.fcm_available = True
-        #         self.get_logger().info("Loaded fcm.joblib (dict)")
-        #     elif isinstance(fc_art, FCMModel):
-        #         prep = fc_art.prep
-        #         self.imp_stats, self.scaler_mean, self.scaler_scale = _extract_imputer_scaler(prep)
-        #         self.fcm_centers = _np64(fc_art.centers_)
-        #         self.fcm_m = float(fc_art.m)
-        #         self.fcm_available = True
-        #         self.get_logger().info("Loaded fcm.joblib (FCMModel)")
-        # except Exception as e:
-        #     self.get_logger().warn(f"fcm.joblib load failed: {e}")
-
-#######################################################################################################################################################
-
 
         self.subscription = self.create_subscription(
             SensStream,
@@ -229,21 +116,12 @@ class ControlTower(Node):
         self.gripper_joint_names = ['joint7', 'joint8']
 
         self.ba_init = [-1.6379, 1.5724, -1.2721, -0.0566, 1.2838, 0.2908, 0.0, 0.0]
-        # self.wm_init = [1.569855, -0.004553, -1.050652, -0.021037, 1.275889, 0.186441, 0.0, 0.0]
         self.wm_init = [1.569855, 0.505457344, -0.91650776, 0.038010476, 0.664895504, 0.178504452, 0.0, 0.0]
-        self.wm_pre_grasp = [1.557995249, 0.693442225, -0.887973870, 0.099570951, 0.397515720, 0.201273613, 0.0, 0.0]
-        # self.ba_end = [-1.5527, 2.6613, -1.5133, -0.2642, 0.6119, 0.3951, 0.0, 0.0]
         self.ba_end = [-1.668361, 1.906768, -1.42798, -0.076177, 1.1511, 0.0429471, 0.0, 0.0]
-        self.wm_end = [1.571, 2.146, -2.268, 0.000, 0.594, 0.000, 0.0, 0.0]
-        self.wm_mid = [1.574251224, 0.336651756, -1.159398016, -0.185900708, 1.287576528, -1.357858404, 0.0, 0.0]
-        self.home = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        self.f = [1.574251224, 0.336651756, -1.159398016, -0.185900708, 1.287576528, -0.1, 0.0, 0.0]
-
-        self.ff = [1.5533, 0.1396, -0.4014, 0.0349, 0.3665, 0.1745, 0.0, 0.0]
         self.h = [-1.7977, 1.5184, -2.1468, 0.6109, 0.4887, -0.4014, 0, 0]
 
         # ── Tactile inference (wm task) ────────────────────────────────
-        self.wm_data_dir = "/home/dyros/mcy_ws/wm_05"
+        self.wm_data_dir = "/home/user/samsung_laundry/Laundry_piper/wm_05"
         os.makedirs(self.wm_data_dir, exist_ok=True)
 
         # Grasp sliding window buffer (50 frames)
@@ -347,7 +225,21 @@ class ControlTower(Node):
 
         target = list(self.current_joint_state[:6])
         target[5] = j6_new
-        return self._send_goal(self._arm_direct_client, self.arm_joint_names, target, wait_for_result=True)
+        # 회전량에 비례한 duration (1.0 rad/s 기준, 0.5~3.0s로 clip) → 고정 5초 대기 제거
+        j6_dur = float(np.clip(abs(delta6) / 1.0, 0.5, 3.0))
+        return self._send_goal(self._arm_direct_client, self.arm_joint_names, target,
+                                wait_for_result=True, time_sec=j6_dur)
+
+    def _wait_future(self, future, timeout_sec=None, label: str = ""):
+        """executor가 메인 스레드에서 계속 spin 중이므로 future 완료를 폴링으로 대기.
+        rclpy.spin_until_future_complete()는 이미 spin 중인 executor와 충돌하므로 사용 불가."""
+        start = time.time()
+        while not future.done():
+            if timeout_sec is not None and time.time() - start > timeout_sec:
+                self.get_logger().error(f"[_wait_future] TIMEOUT ({timeout_sec}s): {label}")
+                return False
+            time.sleep(0.005)
+        return True
 
     # 사용자님의 원본 _send_goal 함수
     def _send_goal(self, client, joint_names, joint_values, wait_for_result=True, timeout_sec=10.0,
@@ -361,12 +253,13 @@ class ControlTower(Node):
         if set(joint_names) == set(self.gripper_joint_names):
             point.time_from_start = Duration(sec=1, nanosec=0)
         else:
-            point.time_from_start = Duration(sec=int(time_sec), nanosec=0)
+            _sec = max(0.0, float(time_sec))
+            point.time_from_start = Duration(sec=int(_sec), nanosec=int(round((_sec - int(_sec)) * 1e9)))
 
         goal_msg.trajectory.points.append(point)
 
         send_goal_future = client.send_goal_async(goal_msg)
-        rclpy.spin_until_future_complete(self, send_goal_future)
+        self._wait_future(send_goal_future, label=f"_send_goal:{client._action_name}:send")
 
         goal_handle = send_goal_future.result()
         if not goal_handle or not goal_handle.accepted:
@@ -394,11 +287,11 @@ class ControlTower(Node):
                     # 취소 완료 대기 (새 goal reject 방지)
                     _c = time.time()
                     while not get_result_future.done() and time.time() - _c < 3.0:
-                        rclpy.spin_once(self, timeout_sec=0.01)
+                        time.sleep(0.01)
                 except Exception:
                     pass
                 return False
-            rclpy.spin_once(self, timeout_sec=0.005)
+            time.sleep(0.005)
 
         result = get_result_future.result()
         if not result:
@@ -419,24 +312,6 @@ class ControlTower(Node):
         else:
             self.get_logger().warn(f"Action '{client._action_name}' failed with status: {result.status}")
             return False
-
-    def send_joint_command(self, joint_values_8dof):
-        self.get_logger().info(f"명령 수신: {joint_values_8dof}")
-        arm_target = joint_values_8dof[0:6]
-        gripper_target = joint_values_8dof[6:8]
-
-        arm_success = self._send_goal(self._arm_client, self.arm_joint_names, arm_target, wait_for_result=True)
-        if not arm_success:
-            self.get_logger().error("팔 이동 실패. 다음 동작을 취소합니다.")
-            # return False
-
-        gripper_success = self._send_goal(self._gripper_client, self.gripper_joint_names, gripper_target, wait_for_result=True)
-        if not gripper_success:
-            self.get_logger().error("그리퍼 이동 실패.")
-            # return False
-
-        self.get_logger().info(f"명령 완료: {joint_values_8dof}")
-        return True
 
     def goal(self, joint_values_8dof, gripper_action='keep', fast=False):
         time_sec = 3.0 if fast else 5.0
@@ -489,7 +364,7 @@ class ControlTower(Node):
             goal_msg.yaw_tol_rad   = 6.28
 
         send_goal_future = self._pose_client.send_goal_async(goal_msg)
-        rclpy.spin_until_future_complete(self, send_goal_future)
+        self._wait_future(send_goal_future, label="send_pose:goal_send")
         goal_handle = send_goal_future.result()
 
         if not goal_handle or not goal_handle.accepted:
@@ -498,7 +373,7 @@ class ControlTower(Node):
         self.get_logger().info("pose_goal 명령 전송 완료.")
 
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future)
+        self._wait_future(result_future, label="send_pose:result")
         result = result_future.result().result
 
         if result.success:
@@ -509,14 +384,20 @@ class ControlTower(Node):
             return False
 
 
-    def move_forward(self, pose: PoseStamped, fallback_to_ik=True):
+    def move_forward(self, pose: PoseStamped, fallback_to_ik=True, skip_mode11=False):
         """
         Hybrid Move Forward (Mode 11 -> Mode 6)
-        Mode 11: Cartesian 직선 경로 + 직접 JTC (충돌 무시)
-        Mode 6 : pure IK fallback
+        Mode 11: Cartesian 직선 경로 + 직접 JTC (충돌 무시). 단, pose_goal_node의 Mode 11
+                 구현은 orientation을 무시하고 "현재 EE orientation 유지"로 덮어써버리므로
+                 (pose_goal.cpp: target.orientation = cur.orientation), pose.orientation을
+                 실제로 반영해야 하는 호출(e.g. 드럼 곡률 pitch 보정)은 skip_mode11=True로
+                 호출해서 Mode 6(전달한 orientation 그대로 IK)로 바로 가야 함.
+        Mode 6 : pure IK fallback (orientation을 그대로 사용)
         Returns: True if success, False otherwise
         """
-        self.get_logger().info("[forward] Starting Hybrid Move (Mode 11 -> Mode 6)")
+        self.get_logger().info(
+            "[forward] Starting " +
+            ("Direct Mode 6 (skip_mode11=True)" if skip_mode11 else "Hybrid Move (Mode 11 -> Mode 6)"))
 
         def run_mode(mode_val):
             goal_msg = PoseGoal.Goal()
@@ -524,17 +405,20 @@ class ControlTower(Node):
             goal_msg.mode = mode_val
 
             send_goal_future = self._pose_client.send_goal_async(goal_msg)
-            rclpy.spin_until_future_complete(self, send_goal_future, timeout_sec=5.0)
+            self._wait_future(send_goal_future, timeout_sec=5.0, label="move_forward:goal_send")
 
             if not send_goal_future.done(): return "timeout"
             goal_handle = send_goal_future.result()
             if not goal_handle or not goal_handle.accepted: return "rejected"
 
             result_future = goal_handle.get_result_async()
-            rclpy.spin_until_future_complete(self, result_future, timeout_sec=20.0)
+            self._wait_future(result_future, timeout_sec=20.0, label="move_forward:result")
             if not result_future.done(): return "timeout"
 
             return "success" if result_future.result().result.success else "fail"
+
+        if skip_mode11:
+            return run_mode(6) == "success"
 
         # 1. Try Mode 11 (Cartesian 직선, 충돌 무시, 직접 JTC)
         res11 = run_mode(11)
@@ -552,10 +436,6 @@ class ControlTower(Node):
         self.cum_x, self.cum_y, self.cum_z = [0.0] * 16, [0.0] * 16, [0.0] * 16
         self.z_aligned, self.contacted = False, False
 
-        self.z_aligned_k, self.contacted_k = False, False
-        self.contacted_ff, self.contacted_kk = False, False
-        self.z_aligned_f, self.contacted_f = False, False
-
         self.get_logger().info("센서 기준값 및 상태 초기화 완료.")
 
     def sensor_callback(self, msg):
@@ -570,10 +450,6 @@ class ControlTower(Node):
                 self.prev_x, self.prev_y, self.prev_z = x_vals, y_vals, z_vals
                 # 첫 프레임엔 예측/표시 안 함
                 self.z_aligned = self.contacted = False
-                self.z_aligned_k = self.contacted_k = False
-                self.z_aligned_f = self.contacted_f = False
-                self.contacted_ff = self.contacted_kk = False
-                # print("처음입니다.")
                 return
 
             dx = [c - p for c, p in zip(x_vals, self.prev_x)]
@@ -590,12 +466,10 @@ class ControlTower(Node):
             max_norm = np.max(norms)
             if max_norm == 0:
                 max_norm = 1e-6
-            scaled_vecs = vecs / max_norm
             weights = norms
             weights[weights == 0] = 1e-6
 
             mean_vec_biased = np.sum(vecs, axis=0) / np.sum(weights)
-            current_features = np.concatenate([scaled_vecs.flatten(), mean_vec_biased])
 
             norm = np.linalg.norm(mean_vec_biased)
             z_axis = np.array([0, 0, 1])
@@ -617,47 +491,6 @@ class ControlTower(Node):
                 # 세탁물 방향이 제각각이라 theta(힘 방향) 조건 불필요
                 # norm이 충분하면 그리퍼 안에 물체가 있는 것으로 판단
                 self.z_aligned = True
-
-########################## 비지도 클러스터링 ####################################################
-
-            # # --- KMeans/FCM --- COLOR_MAP = {0: "green", 1: "red", 2: "gray"}
-            # LABEL_STATE_MAP_k = {0: (False, True), 1: (True, False), 2: (False, False)}    
-            # LABEL_STATE_MAP_f = {0: (False, True), 1: (False, False), 2: (True, False)}          
-
-            # # --- KMeans ---
-            # if getattr(self, "kmeans_available", False) and self.kmeans is not None and self.imp_stats is not None:
-            #     try:
-            #         Xs_k = _preprocess_mb(mean_vec_biased, self.imp_stats, self.scaler_mean, self.scaler_scale)
-            #         k_label = int(self.kmeans.predict(Xs_k)[0])
-            #         za_k, ct_k = LABEL_STATE_MAP_k.get(k_label, (False, False))
-            #         self.z_aligned_k = bool(za_k)
-            #         self.contacted_k = bool(ct_k)
-            #         if self.contacted_k == True:
-            #             # print("kkkkkkkkkkkkkkkkkk")
-            #             self.contacted_kk = True
-
-            #     except Exception as e:
-            #         self.get_logger().warn(f"KMeans predict skipped: {e}")
-            #         # 이전 값 유지
-
-            # # --- FCM ---
-            # if getattr(self, "fcm_available", False) and self.fcm_centers is not None and self.imp_stats is not None:
-            #     try:
-            #         Xs_f = _preprocess_mb(mean_vec_biased, self.imp_stats, self.scaler_mean, self.scaler_scale)
-            #         U = _fcm_membership(Xs_f, self.fcm_centers, self.fcm_m)  # (C,1)
-            #         f_label = int(np.argmax(U[:, 0]))
-            #         za_f, ct_f = LABEL_STATE_MAP_f.get(f_label, (False, False))
-            #         self.z_aligned_f = bool(za_f)
-            #         self.contacted_f = bool(ct_f)
-            #         if self.contacted_f == True:
-            #             # print("ffffffffffffffff")
-            #             self.contacted_ff = True
-
-            #     except Exception as e:
-            #         self.get_logger().warn(f"FCM predict skipped: {e}")
-            #         # 이전 값 유지
-
-   #############################################################################################################################             
 
             # ── basket_ori.py 동일: 6D MRL feature 계산 ────────────────
             vecs_arr = np.array([self.cum_x, self.cum_y, self.cum_z]).T  # (16,3)
@@ -734,9 +567,9 @@ class ControlTower(Node):
 
     def _load_wm_grasp_model(self):
         import joblib, pickle, torch
-        sys.path.insert(0, "/home/dyros/mcy_ws")
+        sys.path.insert(0, "/home/user/samsung_laundry/Laundry_piper")
         from train_gru_ae import GRUAE
-        data_dir = "/home/dyros/mcy_ws/grasp_new"
+        data_dir = "/home/user/samsung_laundry/Laundry_piper/grasp_new"
         use_raw  = False  # basket_ori.py와 동일: grasp는 MRL 모델 강제
         self.grasp_use_raw = use_raw
         suffix   = "_raw" if use_raw else ""
@@ -772,10 +605,10 @@ class ControlTower(Node):
 
     def _load_wm_transport_model(self):
         import joblib, pickle, torch
-        sys.path.insert(0, "/home/dyros/mcy_ws")
+        sys.path.insert(0, "/home/user/samsung_laundry/Laundry_piper")
         from train_gru_ae import GRUAE
         from dual_channel_detector import FramewiseDeltaDetector
-        data_dir = "/home/dyros/mcy_ws/transport_new"
+        data_dir = "/home/user/samsung_laundry/Laundry_piper/transport_new"
         use_raw  = os.path.exists(os.path.join(data_dir, "transport_gru_ae_raw.pt"))
         self.transport_use_raw = use_raw
         suffix   = "_raw" if use_raw else ""
@@ -923,9 +756,6 @@ class ControlTower(Node):
         self.get_logger().info(f"[COLLECT] 저장: {path} ({len(self.transport_raw_save_buf)}프레임)")
         self.transport_raw_save_buf = []
 
-    def close_door(self):
-        pass
-
     def open_door(self):
         pass
 
@@ -960,7 +790,7 @@ class ControlTower(Node):
 
         self.get_logger().info('target_pose 요청 전송')
         future = self._target_client.send_goal_async(goal_msg)
-        rclpy.spin_until_future_complete(self, future)
+        self._wait_future(future, label="target_get:goal_send")
 
         if not future.done():
             self.get_logger().error('Goal 요청 실패')
@@ -973,7 +803,7 @@ class ControlTower(Node):
 
         # 결과 대기
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future)
+        self._wait_future(result_future, label="target_get:result")
         result = result_future.result().result
 
         if result.success:
@@ -1016,20 +846,6 @@ class ControlTower(Node):
 
             return None
         
-    def eunho_sequence(self):
-        self.open_gripper()
-        self.get_logger().info("Step 1 : 이니셜 포즈(wm_init)로 이동 중")
-        while not self.goal(self.wm_init, 'keep'):
-            self.get_logger().warn("  >> 실패 → 재시도 중")
-        self.reset_sensor_data()
-
-        self.get_logger().info("Step 2: 잡기 시도 중...")
-        target_wm = self.target_get(mode="wm")
-        if target_wm:
-            self.get_logger().info("[SUCCESS] Target WM이 존재합니다")
-        else:
-            self.get_logger().info("[FAILED] Target WM이 존재하지 않습니다")
-
     def _normalize_taxels(self, x_vals, y_vals, z_vals):
         """
         raw 16×(x,y,z) -> 48축 Min–Max 정규화 결과를 분해해서 (x,y,z) 반환 (모두 float64)
@@ -1088,6 +904,7 @@ class ControlTower(Node):
         while rclpy.ok():
             _t_cycle = time.time()
             self._timing_log = []
+            _grasp_fail_streak = 0  # 연속 파지 실패 횟수 (3번째 시도부터 fallback 좌표 사용)
             while True:
                 _t = time.time()
                 self.get_logger().info("Step 1 : 이니셜 포즈(wm_init)로 이동 중")
@@ -1096,7 +913,7 @@ class ControlTower(Node):
                 _t = self._step_time("wm_init 이동", _t)
 
                 # wm_init 도달 직후 EE orientation 캡처 (수평 그리퍼 기준 orientation)
-                rclpy.spin_once(self, timeout_sec=0.1)
+                time.sleep(0.1)
                 if self.ee_pose is not None:
                     from scipy.spatial.transform import Rotation as R_scipy
                     self.wm_init_ee_orientation = R_scipy.from_matrix(self.ee_pose[:3, :3])
@@ -1126,6 +943,14 @@ class ControlTower(Node):
                 _WORLD_TO_BASE_Z = 0.445          # base_link is 0.445m above world origin
                 _DRUM_CZ_base   = _DRUM_CZ_world - _WORLD_TO_BASE_Z  # 0.435
 
+                # [FALLBACK] 연속 2회 파지 실패 → 3번째 시도는 x를 드럼 중심으로 강제
+                # (world/base_link 모두 x는 동일, y는 vision 감지값 유지, z는 드럼 기하 공식으로 자동 계산됨)
+                if _grasp_fail_streak == 2:
+                    self.get_logger().warn(
+                        f"[FALLBACK] 연속 파지 실패 {_grasp_fail_streak}회 → "
+                        f"x를 드럼 중심({_DRUM_CX})으로 강제 (y={target_wm.pose.position.y:.3f} 유지)")
+                    target_wm.pose.position.x = _DRUM_CX
+
                 _tx = target_wm.pose.position.x
                 _ty = target_wm.pose.position.y
                 _tz_orig = target_wm.pose.position.z
@@ -1133,6 +958,22 @@ class ControlTower(Node):
                 _r_eff = _math.sqrt(max(0.0, _DRUM_R**2 - _dx**2))
                 _z_bottom_base = _DRUM_CZ_base - _r_eff   # bottom of drum in base_link
                 _z_top_base    = _DRUM_CZ_base + _r_eff   # top of drum in base_link
+
+                # [PITCH 보정] dx=0(드럼 정중앙 바닥)일 때 theta=0 → 접근이 수직에 가까워야 함.
+                # dx→±DRUM_R(드럼 옆쪽)일 때 theta→±90° → 기존 wm_init 수평 접근과 유사.
+                # 즉 필요한 추가 pitch(수평 기준 대비 얼마나 더 아래로 기울일지)는 (90°-|theta|),
+                # 기울이는 방향은 sign(theta)를 따름.
+                # ⚠️ 회전축('y')과 부호는 base_link 축 정의에 따라 실기에서 검증 필요.
+                #    반대로 기운다면 아래 _PITCH_GAIN을 -1.0으로 뒤집을 것. 처음엔 절반(0.5)로
+                #    테스트해서 방향/충돌 여부 확인 후 1.0으로 올리는 걸 권장.
+                _theta = _math.asin(max(-1.0, min(1.0, _dx / _DRUM_R)))
+                _PITCH_GAIN = 1.0  # 방향 확인 완료(0.5 테스트 정상) → 풀 보정으로 상향
+                if self.pitch_fix_enabled:
+                    _pitch_delta = _PITCH_GAIN * _math.copysign(
+                        (_math.pi / 2.0 - abs(_theta)), _theta if _theta != 0.0 else 1.0)
+                else:
+                    # inference_pitch가 아니면 보정 없음(기존 방식과 동일하게 delta=0)
+                    _pitch_delta = 0.0
 
                 # 드럼 표면 1cm 위를 target_wm.z 로 설정
                 _z_new = _z_bottom_base + 0.015
@@ -1161,7 +1002,7 @@ class ControlTower(Node):
                         ps.pose.orientation.z = float(q[2])
                         ps.pose.orientation.w = float(q[3])
 
-                self.get_logger().info(f"\033[94mMoving to Pre-Grasp (5cm above target)...\033[0m")
+                self.get_logger().info("\033[94mMoving to Pre-Grasp (5cm above target)...\033[0m")
                 self.publish_target_marker(pre_grasp_pose.pose, id=2, r=1.0, g=1.0, b=0.0) # Yellow
 
                 # Step 1a: 위치만 먼저 이동 (orientation 무시)
@@ -1170,7 +1011,7 @@ class ControlTower(Node):
                 _t = self._step_time("Pre-Grasp 접근 (send_pose)", _t)
 
                 # Step 1b: joint 6만 wm_init 값으로 회전 → 그리퍼를 바닥과 수평하게
-                self.get_logger().info(f"\033[94mAligning joint6 to horizontal...\033[0m")
+                self.get_logger().info("\033[94mAligning joint6 to horizontal...\033[0m")
                 while not self.align_joint6():
                     self.get_logger().warn("  >> joint6 정렬 실패 → 재시도 중")
                 _t = self._step_time("joint6 정렬", _t)
@@ -1178,25 +1019,38 @@ class ControlTower(Node):
                 # align_joint6 후 실제 EE orientation으로 target_wm / retreat_pose 갱신
                 # wm_init_ee_orientation은 다른 arm 구성에서 캡처된 것이라
                 # pre_grasp 위치에서 push/retreat 시 다른 orientation 목표를 주면 joints가 펴지는 문제 발생
-                rclpy.spin_once(self, timeout_sec=0.15)
+                time.sleep(0.15)
                 if self.ee_pose is not None:
                     from scipy.spatial.transform import Rotation as R_scipy
-                    q_cur = R_scipy.from_matrix(self.ee_pose[:3, :3]).as_quat()
+                    R_cur = R_scipy.from_matrix(self.ee_pose[:3, :3])
+                    # [PITCH 보정] base는 q_cur(align_joint6 직후 실제 자세, 현재 관절 배치와
+                    # 가까워 도달 가능성이 높음)로 유지하되, 합성 순서를 "로컬(우측곱)"로 교정.
+                    # - 좌측곱(R_pitch * R_cur, 글로벌 축)으로 했을 때: 이미 섞인 yaw와 간섭해서
+                    #   joint6/roll이 같이 돌아버림 (그리퍼 한쪽 면이 바닥과 수평이 되는 증상)
+                    # - base를 wm_init_ee_orientation(고정된 다른 관절 구성)으로 바꿨을 때: roll은
+                    #   안 섞이지만 현재 위치와 너무 동떨어져서 "관절이 펴지는" 문제 재발 → push 실패 급증
+                    # → base=q_cur 유지 + R_cur * R_pitch(우측곱=intrinsic/로컬 축)로 두 문제 모두 회피.
+                    # ⚠️ 곱셈 순서가 바뀌면서 pitch 방향도 달라질 수 있음 → 방향/joint6 커플링 둘 다 재검증 필요.
+                    R_pitch_local = R_scipy.from_euler('y', _pitch_delta)
+                    q_cur = (R_cur * R_pitch_local).as_quat()
                     for ps in [target_wm, retreat_pose]:
                         ps.pose.orientation.x = float(q_cur[0])
                         ps.pose.orientation.y = float(q_cur[1])
                         ps.pose.orientation.z = float(q_cur[2])
                         ps.pose.orientation.w = float(q_cur[3])
                     self.get_logger().info(
-                        f"[align_joint6 후] push/retreat orientation 갱신: "
+                        f"[q_cur 로컬축 PitchFix] push/retreat orientation 갱신 "
+                        f"(theta={_math.degrees(_theta):.1f}°, pitch_delta={_math.degrees(_pitch_delta):.1f}°): "
                         f"q=[{q_cur[0]:.3f}, {q_cur[1]:.3f}, {q_cur[2]:.3f}, {q_cur[3]:.3f}]"
                     )
 
                 # 2. Push to Actual Target (Hybrid Move)
-                self.get_logger().info(f"\033[94mPushing to Target WM...\033[0m")
+                self.get_logger().info("\033[94mPushing to Target WM...\033[0m")
                 self.publish_target_marker(target_wm.pose, id=3, r=0.0, g=1.0, b=0.0) # Green (drum-adjusted target)
                 
-                if not self.move_forward(target_wm):
+                # Mode 11은 orientation을 무시하므로, pitch 보정이 켜진 경우에만 Mode 6 직행.
+                # inference(기존 방식)는 원래대로 Mode 11→6 하이브리드 유지.
+                if not self.move_forward(target_wm, skip_mode11=self.pitch_fix_enabled):
                     self._step_time("Push 이동 (실패-재시도)", _t)
                     self.get_logger().warn("  >> push 이동 실패 → 새 target 요청")
                     continue
@@ -1269,6 +1123,12 @@ class ControlTower(Node):
                     if self.run_mode == 'collect':
                         self._save_wm_grasp_data('failure')
                     # ────────────────────────────────────────────────────
+                    # [FALLBACK] fallback 시도(3번째)까지 실패하면 카운터 리셋 → 다음 시도부터 다시 vision 기반
+                    if _grasp_fail_streak >= 2:
+                        self.get_logger().info("[FALLBACK] fallback 시도도 실패 → 다음 시도부터 다시 vision 기반 타겟 사용")
+                        _grasp_fail_streak = 0
+                    else:
+                        _grasp_fail_streak += 1
                     while not self.open_gripper():
                         self.get_logger().warn("  >> 그리퍼 오픈 실패 → 재시도 중")
                     while not self.goal(self.wm_init, 'keep', fast=True):
@@ -1440,7 +1300,6 @@ class ControlTower(Node):
         주기적으로 현재 ee_pose와 ee2cam 행렬을 사용하여 카메라 중심 위치를 Rviz에 표시
         """
         if self.ee_pose is None:
-            # self.get_logger().info("ee_pose is None, skipping camera marker")
             return
 
         ee2cam = np.vstack((np.hstack((self.R_cal, self.t_cal)), [0, 0, 0, 1]))
@@ -1482,8 +1341,10 @@ class ControlTower(Node):
 def main(args=None):
     parser = argparse.ArgumentParser(description='Logic_inte_wm 실행 모드')
     parser.add_argument('--mode', type=str, default='normal',
-                        choices=['normal', 'collect', 'inference'],
-                        help='normal: rule-based | collect: wm 데이터 수집 | inference: GRU-AE 판단')
+                        choices=['normal', 'collect', 'inference', 'inference_pitch'],
+                        help=('normal: rule-based | collect: wm 데이터 수집 | '
+                              'inference: GRU-AE 판단 (pitch 보정 없음, 기존 방식) | '
+                              'inference_pitch: inference와 동일 + 드럼 곡률 pitch 보정'))
     parsed, ros_args = parser.parse_known_args()
 
     rclpy.init(args=ros_args if ros_args else args)
@@ -1494,8 +1355,8 @@ def main(args=None):
         print(f"노드 초기화 중 오류 발생: {e}")
         return
 
-    # MultiThreadedExecutor는 여전히 사용합니다.
-    # 콜백들이 블로킹 함수(spin_until_future_complete)에 의해 중단되지 않도록 하기 위함입니다.
+    # MultiThreadedExecutor: 메인 스레드에서 지속적으로 spin → 항상 콜백 처리
+    # (sensor_callback, joint_state_callback 등이 rclpy.spin_until_future_complete 없이도 항상 동작)
     executor = rclpy.executors.MultiThreadedExecutor()
     executor.add_node(node)
 
@@ -1503,15 +1364,13 @@ def main(args=None):
     sequence_thread = threading.Thread(target=node.execute_sequence, daemon=True)
     sequence_thread.start()
 
-    # =================================================================================
-    # 중요: 메인 스레드에서는 executor.spin()을 호출하지 않습니다!
-    # 대신, 작업 스레드가 끝날 때까지 (또는 Ctrl+C가 눌릴 때까지) 기다리기만 합니다.
-    # 모든 ROS 메시지 처리는 sequence_thread 내부의 rclpy.spin_until_future_complete가
-    # 전담하게 됩니다.
-    # =================================================================================
     try:
-        # 작업 스레드가 살아있는 동안 메인 스레드는 여기서 대기합니다.
-        sequence_thread.join()
+        # 메인 스레드에서 executor를 지속 spin → 콜백 항상 처리
+        while rclpy.ok():
+            try:
+                executor.spin_once(timeout_sec=0.1)
+            except Exception as e:
+                node.get_logger().warn(f"Spin 오류 (계속 진행): {e}")
     except KeyboardInterrupt:
         node.get_logger().info('사용자에 의해 중단 요청됨.')
     finally:

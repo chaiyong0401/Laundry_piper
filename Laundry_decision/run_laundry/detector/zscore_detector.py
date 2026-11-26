@@ -46,20 +46,11 @@ def cluster_and_get_targets(points, mask, eps=0.037, min_samples=40):
         
 
         cluster = target_pts[labels == label]
-        # if cluster.mean(axis=0)[1] < -0.15:
-        #     print(f" - [Filtered] y={cluster.mean(axis=0)[1]:.3f} < -0.15 → 제외")
-        #     continue
         
-        # if cluster.mean(axis=0)[1] < -0.15:
-        #     print(f" - [Filtered] y={cluster.mean(axis=0)[1]:.3f} < -0.15 → 제외")
-        #     continue
         
         centered = cluster - cluster.mean(axis=0)
-        _, S, Vt = np.linalg.svd(centered)
-        ratio = S[0] / (S[1] + 1e-6)
+        _, _, Vt = np.linalg.svd(centered)
         cos_angle = np.abs(np.dot(Vt[0], np.array([0, 0, 1])))
-        principal_dir = Vt[0]
-        #print(f"number of cluster : ")
         
         if cos_angle > 0.8 and cluster.mean(axis=0)[1] < -0.05:
             print(f" - cos_angle {cos_angle}")
@@ -67,31 +58,12 @@ def cluster_and_get_targets(points, mask, eps=0.037, min_samples=40):
             continue
         
         
-        # debug 
-        # print(f" - Principal Direction: {np.round(principal_dir, 3)}")
-        # print(f" - PCA ratio: {ratio:.2f}")
         
 
         
         clusters.append(cluster)
         centers.append(np.mean(cluster, axis=0))
 
-    # 날개 파편 제거: 필터된 cluster(날개 판정)와 가까운 cluster도 제거
-    # 하나의 날개가 2개 cluster로 분리될 때 PCA 필터를 통과한 파편을 잡기 위함
-    # WING_PROXIMITY_THRESH = 0.08  # 8cm 이내면 같은 날개로 간주
-    # if filtered:
-    #     filtered_centers = np.array([np.mean(fc, axis=0) for fc in filtered])
-    #     keep_clusters, keep_centers = [], []
-    #     for c, center in zip(clusters, centers):
-    #         dists = np.linalg.norm(filtered_centers - center, axis=1)
-    #         if np.min(dists) < WING_PROXIMITY_THRESH:
-    #             print(f" - [Wing Proximity Filter] center={np.round(center, 3)}, "
-    #                   f"min_dist={np.min(dists):.3f} < {WING_PROXIMITY_THRESH} → 날개 파편 제거")
-    #             filtered.append(c)
-    #         else:
-    #             keep_clusters.append(c)
-    #             keep_centers.append(center)
-    #     clusters, centers = keep_clusters, keep_centers
 
     return centers, clusters, filtered
 
@@ -218,7 +190,6 @@ def split_colorful_clusters(clusters, color_image, intr, method="mean_shift", co
                 for i in range(2):
                     new_clusters.append(cluster[km.labels_ == i])
             elif method == "mean_shift":
-                from sklearn.cluster import MeanShift
                 ms = MeanShift(bandwidth=10.0).fit(ab)
                 labels = ms.labels_
                 for lbl in np.unique(labels):

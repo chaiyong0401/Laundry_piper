@@ -44,39 +44,6 @@ def split_cluster_by_color(cluster_points, cluster_colors, method='kmeans', k=2)
         subclusters.append(cluster_points[labels == label])
     return subclusters
 
-# def get_current_pointcloud(pipeline, depth_crop=(0.3, 0.90)):
-#     align = rs.align(rs.stream.color)
-#     frames = pipeline.wait_for_frames()
-#     aligned = align.process(frames)
-#     depth = aligned.get_depth_frame()
-#     color = aligned.get_color_frame()
-
-#     pc = rs.pointcloud()
-#     pc.map_to(color)
-#     points = pc.calculate(depth)
-
-#     vtx = np.asanyarray(points.get_vertices()).view(np.float32).reshape(-1, 3)
-#     tex = np.asanyarray(points.get_texture_coordinates()).view(np.float32).reshape(-1, 2)
-#     img = np.asanyarray(color.get_data())
-
-#     h, w, _ = img.shape
-#     colors = []
-#     for u, v in tex:
-#         x, y = min(int(u * w), w - 1), min(int(v * h), h - 1)
-#         colors.append(img[y, x] / 255.0)
-
-#     pcd = o3d.geometry.PointCloud()
-#     pcd.points = o3d.utility.Vector3dVector(vtx)
-#     pcd.colors = o3d.utility.Vector3dVector(np.array(colors))
-
-#     pts = np.asarray(pcd.points)
-#     mask = (pts[:, 2] > depth_crop[0]) & (pts[:, 2] < depth_crop[1])
-#     pcd.points = o3d.utility.Vector3dVector(pts[mask])
-#     if pcd.has_colors():
-#         col = np.asarray(pcd.colors)[mask]
-#         pcd.colors = o3d.utility.Vector3dVector(col)
-
-#     return np.asarray(pcd.points)
 def get_current_pointcloud(pipeline, depth_crop=(0.3, 0.99)):
     align = rs.align(rs.stream.color)
     frames = pipeline.wait_for_frames()
@@ -95,14 +62,13 @@ def get_current_pointcloud(pipeline, depth_crop=(0.3, 0.99)):
     img = np.asanyarray(color.get_data())
 
     h, w, _ = img.shape
-    colors = []
-    for u, v in tex:
-        x, y = min(int(u * w), w - 1), min(int(v * h), h - 1)
-        colors.append(img[y, x] / 255.0)
+    xs = np.minimum((tex[:, 0] * w).astype(np.int32), w - 1)
+    ys = np.minimum((tex[:, 1] * h).astype(np.int32), h - 1)
+    colors = img[ys, xs] / 255.0
 
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(vtx)
-    pcd.colors = o3d.utility.Vector3dVector(np.array(colors))
+    pcd.colors = o3d.utility.Vector3dVector(colors)
 
     pts = np.asarray(pcd.points)
     mask = (pts[:, 2] > depth_crop[0]) & (pts[:, 2] < depth_crop[1])

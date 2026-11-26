@@ -158,7 +158,6 @@ private:
   std::string base_frame_, ee_link_, EEE_, DEEP_;
   Eigen::VectorXd previous_error_ = Eigen::VectorXd::Zero(6);
 
-  // rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr velocity_publisher_; // CLIK
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr velocity_publisher_; // CLIK
 
   // -------- 액션 콜백 --------
@@ -207,7 +206,6 @@ private:
       move_group_->setGoalOrientationTolerance(0.1);  // ~0.57°
 
       move_group_->setPoseTarget(goal->target_pose.pose, ee_link_);
-      // move_group_->setPoseTarget(goal->target_pose.pose, EEE_);
       ok = plan_and_exec();  //debug
       msg = ok ? "SUCCESS(M0)" : "FAILED(M0)"; //debug
     } 
@@ -550,7 +548,6 @@ private:
 
       // 4) 제약(Constraints) 직접 생성 (frame/링크 명확)
       const std::string ref_frame = move_group_->getPlanningFrame(); // 보통 base/world
-      // ref_frame = base_frame_;
       move_group_->setPoseReferenceFrame(base_frame_); //
       move_group_->setEndEffectorLink(ee_link_); //    ee_link_    = "tcp";
 
@@ -606,7 +603,6 @@ private:
 
       // 4) 제약(Constraints) 직접 생성 (frame/링크 명확)
       const std::string ref_frame = move_group_->getPlanningFrame(); // 보통 base/world
-      // ref_frame = base_frame_;
       move_group_->setPoseReferenceFrame(base_frame_); //
       move_group_->setEndEffectorLink(DEEP_); //    DEEP_    = "DEEP";
 
@@ -797,40 +793,6 @@ private:
                   move_group_->getPlanningPipelineId().c_str(),
                   move_group_->getPlannerId().c_str());
 
-      // //////////////// 어떤 조인트가 문제인지 확인용 //
-      // {
-      //   const auto cur_state_ptr = move_group_->getCurrentState();
-      //   if (!cur_state_ptr) {
-      //     RCLCPP_ERROR(this->get_logger(), "[START-BOUNDS] current state is nullptr");
-      //   } else {
-      //     moveit::core::RobotState start = *cur_state_ptr;
-      //     // 로봇 전체의 모든 변수 확인
-      //     const auto& vars = start.getVariableNames();
-      //     for (const auto& var : vars) {
-      //       double v = start.getVariablePosition(var);
-      //       const auto& b = start.getRobotModel()->getVariableBounds(var);
-
-      //       if (b.position_bounded_) {
-      //         if (v < b.min_position_ || v > b.max_position_) {
-      //           RCLCPP_WARN(this->get_logger(),
-      //                       "[START-BOUNDS] %s = %.6f (min=%.6f, max=%.6f)",
-      //                       var.c_str(), v, b.min_position_, b.max_position_);
-      //         }
-      //       }
-      //     }
-      //   }
-      // }
-
-      /////////////////////////////// 포지션만 ////
-      // move_group_->setPositionTarget(
-      //   goal->target_pose.pose.position.x,
-      //   goal->target_pose.pose.position.y,
-      //   goal->target_pose.pose.position.z,
-      //   ee_link_);
-      // ok = plan_and_exec();
-      // msg = ok ? "SUCCESS(M3)" : "FAILED(M3)";
-            
-
       // 2) 시작 상태 속도 0 보장
       {
         moveit::core::RobotState start = *move_group_->getCurrentState();
@@ -857,27 +819,11 @@ private:
       ps.pose = target;
 
       move_group_->setPoseTarget(ps, ee_link_);
-      // ok = plan_and_exec();
-      // // CLIK
-      // if (ok) {
-      //       msg = "SUCCESS(M3-Pilz)";
-      //   } else {
-      //       //  Pilz 실패 시 CLIK로 자동 전환 ===
-      //       RCLCPP_WARN(logger_, "[Mode 3] Pilz 직선 경로 실패! CLIK 제어로 전환합니다.");
-            
-      //       ok = execute_clik_fallback(goal->target_pose.pose); // CLIK 실행
-      //       msg = ok ? "SUCCESS(M3-CLIK)" : "FAILED(M3-CLIK)";
-      //       //  Pilz 실패 시 CLIK로 자동 전환 ===
-      //   }
 
       RCLCPP_WARN(logger_, "[Mode 3] Pilz 직선 경로 실패! CLIK 제어로 전환합니다.");      
       ok = execute_clik_fallback(goal->target_pose.pose); // CLIK 실행
       msg = ok ? "SUCCESS(M3-CLIK)" : "FAILED(M3-CLIK)";
 
-      // result->success = ok;
-      // result->message = msg;
-      // if (ok) gh->succeed(result); else gh->abort(result);
-      // CLIK
 
 
     /////////////////////////////////////// RPY_CONSTRAINT ee_link 안쪽 
@@ -909,8 +855,6 @@ private:
         goal->target_pose.pose.position.z,
         ee_link_); // EEE_
         
-      // ok = plan_and_exec(); // debug
-      // msg = ok ? "SUCCESS(M1)" : "FAILED(M1)"; //debug
 
       move_group_->clearPathConstraints();
 
@@ -943,8 +887,6 @@ private:
         goal->target_pose.pose.position.z,
         EEE_); 
         
-      // ok = plan_and_exec(); //debug
-      // msg = ok ? "SUCCESS(M2)" : "FAILED(M2)"; //debug
 
       move_group_->clearPathConstraints();
 
@@ -1052,7 +994,6 @@ private:
                                      jacobian);
 
           Eigen::MatrixXd jacobian_pinv = jacobian.completeOrthogonalDecomposition().pseudoInverse();
-          // Eigen::VectorXd desired_twist = -Kp * error;
           Eigen::VectorXd joint_velocities = jacobian_pinv * desired_twist;
 
           // 관절 속도 명령 퍼블리시

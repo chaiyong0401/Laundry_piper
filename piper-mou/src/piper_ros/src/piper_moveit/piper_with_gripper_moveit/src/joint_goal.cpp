@@ -26,12 +26,6 @@ public:
             return;
         }
 
-        // move_group_->setGoalPositionTolerance(0.1);    // 위치 허용오차 10cm
-        // move_group_->setGoalOrientationTolerance(0.5); // 자세 허용오차 약 30도
-        // move_group_->setPlanningTime(5.0);              // 플래닝 시간 늘리기
-        // move_group_->setMaxVelocityScalingFactor(0.5);  // 속도 줄이면 성공률↑
-        // move_group_->setMaxAccelerationScalingFactor(0.5);
-
         action_server_ = rclcpp_action::create_server<FollowJointTrajectory>(
             node_,
             action_name,

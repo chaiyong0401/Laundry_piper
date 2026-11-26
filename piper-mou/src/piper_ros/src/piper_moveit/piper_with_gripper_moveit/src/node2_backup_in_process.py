@@ -20,7 +20,7 @@ subprocess 방식 대신 모델·카메라·배경을 프로세스 상주시키�
   python node2_backup_in_process.py [--device cpu|cuda] [--gpu] [--show]
 """
 
-import os, sys, json, time, math, collections, threading
+import os, sys, json, math, collections, threading
 import time as _time
 import argparse
 from typing import Optional, Tuple
@@ -40,27 +40,26 @@ from geometry_msgs.msg import Pose
 from piper_with_gripper_moveit.action import TargetPose
 
 # ── 경로 상수 ─────────────────────────────────────────────────────────────────
-CKPT_PATH_B   = "/home/dyros/mcy_ws/Laundry_decision/run_bf/dataset_rgb_sam2/unet_best_basket_new.pt"
-CKPT_PATH_F   = "/home/dyros/mcy_ws/Laundry_decision/run_bf/dataset_rgb_sam2/unet_best_failure_new.pt"
-CKPT_PATH_RGB = "/home/dyros/mcy_ws/Laundry_decision/run_bf/dataset_rgb_sam2/rgb_only.pth"
-INTR_COLOR    = "/home/dyros/mcy_ws/Laundry_decision/run_bf/intrinsics_color_640x480.json"
-INTR_DEPTH    = "/home/dyros/mcy_ws/Laundry_decision/run_bf/intrinsics_depth_640x480.json"
-BG_BASKET     = "/home/dyros/mcy_ws/Laundry_decision/run_bf/laundry_bg/bg_basket.npy"
-BG_FAILURE    = "/home/dyros/mcy_ws/Laundry_decision/run_bf/laundry_bg/bg_overcome2.npy"
-SAVE_DIR_EH   = "/home/dyros/mcy_ws/Laundry_decision/run_bf/eh_dbg"
+CKPT_PATH_B   = "/home/user/samsung_laundry/Laundry_piper/Laundry_decision/run_bf/dataset_rgb_sam2/unet_best_basket_new.pt"
+CKPT_PATH_F   = "/home/user/samsung_laundry/Laundry_piper/Laundry_decision/run_bf/dataset_rgb_sam2/unet_best_failure_new.pt"
+CKPT_PATH_RGB = "/home/user/samsung_laundry/Laundry_piper/Laundry_decision/run_bf/dataset_rgb_sam2/rgb_only.pth"
+INTR_COLOR    = "/home/user/samsung_laundry/Laundry_piper/Laundry_decision/run_bf/intrinsics_color_640x480.json"
+INTR_DEPTH    = "/home/user/samsung_laundry/Laundry_piper/Laundry_decision/run_bf/intrinsics_depth_640x480.json"
+BG_BASKET     = "/home/user/samsung_laundry/Laundry_piper/Laundry_decision/run_bf/laundry_bg/bg_basket.npy"
+BG_FAILURE    = "/home/user/samsung_laundry/Laundry_piper/Laundry_decision/run_bf/laundry_bg/bg_overcome2.npy"
 
 
 # ── wm 모드 상수 (run_laundry.py CFG["wm"] 와 동일) ─────────────────────────
-WM_RGB_CKPT      = "/home/dyros/mcy_ws/Laundry_decision/run_laundry/models/best.pt"
-WM_DETECTOR_DIR  = "/home/dyros/mcy_ws/Laundry_decision/run_laundry"
+WM_RGB_CKPT      = "/home/user/samsung_laundry/Laundry_piper/Laundry_decision/run_laundry/models/best.pt"
+WM_DETECTOR_DIR  = "/home/user/samsung_laundry/Laundry_piper/Laundry_decision/run_laundry"
 WM_Z_MIN         = 0.35
 WM_Z_MAX         = 0.65
 WM_CYL_RADIUS    = 0.29
 WM_FILTER_RADIUS = 0.285
 WM_EPS           = 0.037
 WM_MIN_SAMPLES   = 45
-WM_RGB_HI_THR    = 0.60
-WM_RGB_LO_THR    = 0.45
+WM_RGB_HI_THR    = 0.65
+WM_RGB_LO_THR    = 0.60
 
 
 # ── wm in-process 헬퍼 (run_laundry.py에서 이식) ─────────────────────────────
@@ -261,8 +260,8 @@ class RGBGate:
         cloth_p   = float(prob[self.cloth_idx]) if 0 <= self.cloth_idx < prob.numel() else float(prob.max())
         self.ema_prob = (cloth_p if self.ema_prob is None
                          else self.ema_decay*self.ema_prob + (1-self.ema_decay)*cloth_p)
-        decision = ("CLOTH" if self.ema_prob >= hi_thr
-                    else "EMPTY" if self.ema_prob < lo_thr else "CLOTH")
+        # hi_thr 미만은 전부 EMPTY (lo_thr~hi_thr 애매 구간도 안전하게 EMPTY 처리)
+        decision = "CLOTH" if self.ema_prob >= hi_thr else "EMPTY"
         return {"pred_label": self.idx_to_class.get(pred_idx, str(pred_idx)),
                 "cloth_prob": cloth_p, "ema_prob": float(self.ema_prob), "decision": decision}
 
@@ -621,26 +620,6 @@ class VisionEngine:
             self._cur_exposure = None   # 강제 재설정 트리거
             self._set_exposure('auto', flush_n=60)
 
-            # ── 진단: 센서 목록 + exposure 값 출력 ──────────────────────────
-            import pyrealsense2 as _rs_diag
-            print("[wm][diag] === 센서 목록 ===")
-            for _s in self._rs_profile.get_device().query_sensors():
-                try:
-                    _sname = _s.get_info(_rs_diag.camera_info.name)
-                except Exception:
-                    _sname = "unknown"
-                _is_color = _s.is_color_sensor()
-                _is_depth = _s.is_depth_sensor()
-                print(f"[wm][diag]  sensor: '{_sname}'  is_color={_is_color}  is_depth={_is_depth}")
-                try:
-                    _exp = _s.get_option(_rs_diag.option.exposure)
-                    _ae  = _s.get_option(_rs_diag.option.enable_auto_exposure)
-                    print(f"[wm][diag]    AE={_ae}  exposure={_exp:.0f}μs")
-                except Exception as _e:
-                    print(f"[wm][diag]    exposure 읽기 실패: {_e}")
-            print("[wm][diag] =================")
-            # ────────────────────────────────────────────────────────────────
-
             fn  = self._wm_funcs
             o3d = self._wm_o3d
 
@@ -722,8 +701,10 @@ class VisionEngine:
             mask, _, _  = fn['anomalies'](final_pts, ref_pts)
             centers, clusters, _ = fn['cluster'](final_pts, mask,
                                                   eps=WM_EPS, min_samples=WM_MIN_SAMPLES)
+            # color_thresh=1은 거의 모든 클러스터가 MeanShift 재분할을 타서 매우 느려짐 (수 초 단위)
+            # → 색상 재분할이 필요 없다고 판단, 기본값(15)으로 복원
             clusters = fn['split_color'](clusters, color_img, intr,
-                                         method="mean_shift", color_thresh=1)
+                                         method="mean_shift", color_thresh=15)
             centers = [np.mean(c, axis=0) for c in clusters]
 
             if not centers:
@@ -756,7 +737,6 @@ class VisionEngine:
             while True:
                 elapsed = _time.time() - t0
                 if elapsed > max_wait_sec:
-                    print(f"[INFER_TIMER] detect_basket: {elapsed:.2f}s (timeout)")
                     return {"success": False, "empty": True, "mode": "basket",
                             "centers": [], "pixel_center": [], "theta": 0.0,
                             "area": 0, "dt": 0.0}
@@ -795,8 +775,6 @@ class VisionEngine:
                 _, theta, _, _ = _analyze_mask(mask)
                 first_area, first_dt, first_cx, first_cy = candidates[0]
 
-                elapsed = _time.time() - t0
-                print(f"[INFER_TIMER] detect_basket: {elapsed:.2f}s ({len(centers_3d)}개 후보)")
                 return {"success": True, "empty": False, "mode": "basket",
                         "centers": centers_3d, "pixel_center": [first_cx, first_cy],
                         "theta": float(theta), "area": int(first_area), "dt": float(first_dt)}
@@ -816,25 +794,6 @@ class VisionEngine:
         with self._lock:
             self._set_exposure('auto', flush_n=30)
 
-            # ── 진단: failure 모드 센서 exposure 상태 출력 ──────────────────
-            import pyrealsense2 as _rs_diag_f
-            print("[failure_eh][diag] === 센서 목록 ===")
-            for _s in self._rs_profile.get_device().query_sensors():
-                try:
-                    _sname = _s.get_info(_rs_diag_f.camera_info.name)
-                except Exception:
-                    _sname = "unknown"
-                _is_color = _s.is_color_sensor()
-                _is_depth = _s.is_depth_sensor()
-                print(f"[failure_eh][diag]  sensor: '{_sname}'  is_color={_is_color}  is_depth={_is_depth}")
-                try:
-                    _exp = _s.get_option(_rs_diag_f.option.exposure)
-                    _ae  = _s.get_option(_rs_diag_f.option.enable_auto_exposure)
-                    print(f"[failure_eh][diag]    AE={_ae}  exposure={_exp:.0f}μs")
-                except Exception as _e:
-                    print(f"[failure_eh][diag]    exposure 읽기 실패: {_e}")
-            print("[failure_eh][diag] =================")
-
             self._rgb_gate.reset()       # EMA 초기화 (subprocess 방식과 동일)
             votes     = collections.deque(maxlen=max(1, vote_k))
             t0        = _time.time()
@@ -844,8 +803,6 @@ class VisionEngine:
             while True:
                 now = _time.time()
                 if now - t0 > max_sec:
-                    elapsed = now - t0
-                    print(f"[INFER_TIMER] detect_failure_eh: {elapsed:.2f}s (timeout)")
                     return {"success": False, "reason": "timeout"}
 
                 depth, color_bgr, color_rgb = self._get_frame()
@@ -853,10 +810,7 @@ class VisionEngine:
 
                 # ── RGB gate: 빈 세탁기 빠른 감지 ─────────────────────────────
                 g = self._rgb_gate.decide(color_bgr, hi_thr=0.60, lo_thr=0.55)
-                print(f"[failure_eh] rgb-gate {g['decision']} cloth_p={g['cloth_prob']:.2f} ema={g['ema_prob']:.2f}")
                 if g["decision"] == "EMPTY":
-                    elapsed = _time.time() - t0
-                    print(f"[INFER_TIMER] detect_failure_eh: {elapsed:.2f}s (rgb_gate_empty)")
                     return {"success": False, "reason": "rgb_gate_empty", "object_count": 0}
 
                 # ── TinyUNet (failure domain=1) 세탁물 segmentation ──────────
@@ -878,7 +832,6 @@ class VisionEngine:
                     z_m    = float(np.median(val)) if val.size > 0 else 0.07
                     X, Y, Z = _uvz_to_xyz(cx, cy, z_m, fx, fy, ppx, ppy)
                     xyz = (X, Y, Z); last_ok_t = now; accepted = True
-                    print(f"[failure_eh] unet OK area={area} dt={dt_peak:.1f} xyz=({X:.3f},{Y:.3f},{Z:.3f})")
                 else:
                     # TinyUNet mask 불충분 → depth heuristic fallback
                     # fallback은 _grasp_from_mask (cx+width/8 offset 포함) 유지
@@ -891,7 +844,6 @@ class VisionEngine:
                         z_m    = float(np.median(val)) if val.size > 0 else 0.07
                         X, Y, Z = _uvz_to_xyz(cx, cy, z_m, fx, fy, ppx, ppy)
                         xyz = (X, Y, Z); last_ok_t = now; accepted = True
-                        print(f"[failure_eh] heuristic fallback area={area_h} dt={dt_h:.1f}")
 
                 # ── vote (vote_require_curr=True) ────────────────────────────
                 if accepted and xyz is not None:
@@ -911,8 +863,6 @@ class VisionEngine:
                     arr = np.array(votes, np.float32)
                     med = np.median(arr, axis=0).tolist()
                     med[2] += 0.01   # 1cm offset (run_failure_eh.py 동일)
-                    elapsed = _time.time() - t0
-                    print(f"[INFER_TIMER] detect_failure_eh: {elapsed:.2f}s (vote OK, n={vote_k})")
                     if self._show:
                         cv2.destroyAllWindows()
                     return {"success": True, "centers": [med]}
