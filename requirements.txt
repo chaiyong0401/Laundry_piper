@@ -21,10 +21,14 @@ h5py==3.15.1
 # ── 비전 / 카메라 ──────────────────────────────────────────────
 opencv-python==4.11.0.86
 Pillow==9.0.1
-pyrealsense2==2.56.5.9235      # Intel RealSense D435i
+pyrealsense2==2.56.5.9235      # Intel RealSense D405
+open3d==0.19.0                 # 비전 노드·바닥 실패물 검출기(ICP, 포인트클라우드)
 
 # ── 시각화 ─────────────────────────────────────────────────────
 matplotlib==3.5.1
+
+# ── 센서 통신 ──────────────────────────────────────────────────
+websocket-client               # xela_service.py, tactile_anomaly/xela_bridge.py
 
 # ── 시스템 모니터링 ────────────────────────────────────────────
 psutil==5.9.0
@@ -35,10 +39,9 @@ psutil==5.9.0
 # [ROS2 Humble] → https://docs.ros.org/en/humble/Installation.html
 #   sudo apt install ros-humble-desktop ros-humble-moveit
 #   sudo apt install ros-humble-ros2-control ros-humble-ros2-controllers
+#   sudo apt install ros-humble-pinocchio ros-humble-xacro   # basket_ori.py 동역학 모델
 #
 # [XELA 센서 드라이버]
-#   → xela_server_ros2 패키지 별도 설치
+#   → xela_server_ros2(ROS 브리지)는 piper-mou에 포함, XELA 서버 실행 파일(xela_server 등)은 별도 전달
 #
-# [모델/스케일러 파일] → 별도 복사 필요
-#   grasp_new/  : grasp_scaler*.pkl, grasp_infer_cfg*.pkl, grasp_threshold*.npy
-#   transport_new/ : transport_scaler*.pkl, transport_infer_cfg*.pkl, transport_threshold*.npy
+# [모델/스케일러 파일] → 별도 전달, 목록과 위치는 README.md "4. 모델·데이터 파일" 참고
